@@ -349,22 +349,82 @@ class Orchestrator:
 
     # -- backward -----------------------------------------------------------------
     @staticmethod
-    def _backward_view(s: snap_mod.Snapshot) -> Dict[str, Any]:
-        # Keep the complete normalized view. Filtering flow to case triggers
-        # hides exactly the process/connection combinations forward missed.
+    def _backward_view(s: snap_mod.Snapshot, flow_keys: Dict[str, set[str]]) -> Dict[str, Any]:
+        # Compare flow by normalized key presence, not volatile cmdline/cwd/name
+        # fields. The candidate set includes every combination new during the
+        # case, including those the forward gate did not list as triggers.
         if s.errors:
             raise ValueError(f"Incomplete backward snapshot: {sorted(s.errors)}")
-        return {"stable": s.data.get("stable", {}), "flow": s.data.get("flow", {})}
+        flow = {
+            table: {key: True for key in rows if key in flow_keys.get(table, set())}
+            for table, rows in s.data.get("flow", {}).items()
+        }
+        return {"stable": s.data.get("stable", {}), "flow": flow}
+
+    def _case_flow_keys(self, case_id: str) -> Dict[str, set[str]]:
+        # T2-only flows belong to later activity and are handled by the next
+        # forward cycle; only combinations present at detection can be tied to
+        # this case's cleanup. Do not limit these to reported trigger keys.
+        m = self.cases.meta(case_id)
+        t1 = self.store.load(m["t1"]) if m.get("t1") else None
+        if t1 is None or t1.errors:
+            raise ValueError("T1 flow snapshot is unavailable or incomplete")
+        t0_ts = m.get("t0")
+        t0 = self.store.load(t0_ts) if t0_ts else None
+        if t0 is not None and t0.errors:
+            raise ValueError("T0 flow snapshot is incomplete")
+        process_meta = t1.meta.get("processes", {})
+        own_pids = {str(os.getpid())}
+        for _ in range(len(process_meta)):
+            children = {str(meta.get("pid")) for meta in process_meta.values()
+                        if str(meta.get("ppid")) in own_pids}
+            if children <= own_pids:
+                break
+            own_pids.update(children)
+
+        candidates: Dict[str, set[str]] = {}
+        for table, rows in t1.data.get("flow", {}).items():
+            seen = self.baseline.seen.get(table, {})
+            selected = set()
+            for key in rows:
+                if t0 is not None and key in t0.data.get("flow", {}).get(table, {}):
+                    continue
+                first_seen = seen.get(key)
+                if t0_ts is not None and first_seen is not None and first_seen < t0_ts:
+                    continue  # known before this case: normal reappearance/churn
+                meta = t1.meta.get(table, {}).get(key, {})
+                if str(meta.get("pid")) in own_pids:
+                    continue
+                raw = meta.get("_row") or {}
+                name = str(raw.get("name") or "")
+                exe = str(raw.get("path") or "")
+                if table == "processes" and (name.startswith("kworker/") or
+                                              str(raw.get("parent_name") or "") == "kthreadd" or
+                                              "openshell-sandbox" in (exe or name).lower()):
+                    continue
+                if table == "connections":
+                    if "|public:*" in key:  # trusted-egress bucket from perception
+                        continue
+                    internal_mcp = (str(raw.get("remote_port")) == "8443"
+                                    and str(meta.get("remote_address")) in {"172.18.0.1", "172.17.0.1"}
+                                    and ("openshell" in exe.lower() or "nemoclaw" in exe.lower()
+                                         or "openshell" in name.lower() or "nemoclaw" in name.lower()))
+                    if internal_mcp:
+                        continue
+                selected.add(key)
+            candidates[table] = selected
+        return candidates
 
     def _backward_snapshot(self, case: Any, phase: str) -> Dict[str, Any]:
         case_id = case.case_id if hasattr(case, "case_id") else case["case_id"]
         m = self.cases.meta(case_id)
+        flow_keys = self._case_flow_keys(case_id)
         if phase == "T2":
             if m.get("t2"):
                 s = self.store.load(m["t2"])
             else:
                 s = snap_mod.collect()
-                self._backward_view(s)  # never store an incomplete T2 as a successful cleanup view
+                self._backward_view(s, flow_keys)  # never store an incomplete T2 as a successful cleanup view
                 self.store.save(s)
                 self.cases.save(self.cases.case(case_id), t2=s.ts)
         else:
@@ -374,15 +434,16 @@ class Orchestrator:
                 # cannot tell attack residue already present at T1 from the baseline; the report says so.
                 ts = m.get("t1")
                 self.cases.save(self.cases.case(case_id), t0_fallback="T1")
-            s = self.store.at_or_after(ts) if ts else None
+            s = self.store.load(ts) if ts else None
             if s is None:
                 return {}
-        return self._backward_view(s)
+        return self._backward_view(s, flow_keys)
 
     def _backward_observations(self, case: Any) -> List[Dict[str, Any]]:
         case_id = case.case_id if hasattr(case, "case_id") else case["case_id"]
         t2 = self.cases.meta(case_id).get("t2")
-        return [self._backward_view(s) for s in self.store.since(t2)[:12]] if t2 else []
+        flow_keys = self._case_flow_keys(case_id)
+        return [self._backward_view(s, flow_keys) for s in self.store.since(t2)[:12]] if t2 else []
 
     def _followup_backward(self, case_id: str, delay: float) -> None:
         # --once still gets a later observation. A running daemon may also have
@@ -393,7 +454,7 @@ class Orchestrator:
             return
         try:
             observation = snap_mod.collect()
-            self._backward_view(observation)
+            self._backward_view(observation, self._case_flow_keys(case_id))
             self.store.save(observation)
         except Exception as e:  # noqa: BLE001
             log.exception("backward observation failed for %s", case_id)

@@ -91,7 +91,7 @@ class BackwardVerifier:
 
         for indicator in _indicators(_field(case, "ioc", ())):
             probes += 1
-            present = any(_contains_indicator(value, indicator) for value in t2.values())
+            present = _observed(indicator, t2)
             failures += int(present)
             residue |= present
             evidence.append({"probe": "ioc_cleanup", "indicator": indicator,
@@ -143,9 +143,8 @@ class BackwardVerifier:
                 evidence.append({"probe": "judge_quality", "result": "unavailable"})
 
         attack_observed = bool(attacked_paths) or any(
-            _contains_indicator(value, indicator)
+            _observed(indicator, t1)
             for indicator in _indicators(_field(case, "ioc", ()))
-            for value in t1.values()
         )
         if not attack_observed or coverage_gap:
             deterministic_score = 0.0
@@ -167,6 +166,11 @@ class BackwardVerifier:
         extend = confidence < 0.70 or residue or recurrence or outcome == "indeterminate"
         deeper = ("verify_system_files", "check_deleted_running_processes", "inspect_recent_system_changes") if extend else ()
         overall = 0.7 * deterministic_score + 0.3 * quality_score
+        indeterminate_reason = (
+            "No case-linked change was observable at T1" if not attack_observed else
+            "Case impact was not covered by snapshots" if coverage_gap else
+            "A new flow appeared only after detection" if unexplained_flow else ""
+        )
         card = {
             "case_id": case_id,
             "outcome": outcome,
@@ -181,6 +185,7 @@ class BackwardVerifier:
             ],
             "next_steps": list(deeper),
             "observation_pending": not bool(observations),
+            "reason": indeterminate_reason,
         }
         verdict = {
             "fully_cleared": CleanupVerdict.CLEARED,
@@ -196,8 +201,15 @@ class BackwardVerifier:
         explicitly_listed = set(_indicators(_field(case, "blast_radius", ()))) | set(
             _indicators(_field(case, "ioc", ()))
         )
+        trigger_paths = {
+            f"flow.{item['table']}.{item['field']}"
+            for item in _field(case, "triggers", ())
+            if isinstance(item, Mapping) and item.get("table") in {"processes", "connections"}
+            and isinstance(item.get("field"), str)
+        }
         missed = [item for item in residuals if item.get("probe") == "full_snapshot"
-                  and item.get("path") not in explicitly_listed]
+                  and item.get("path") not in explicitly_listed
+                  and item.get("path") not in trigger_paths]
         contract_result = BackwardResult(
             verdict=verdict,
             total_score=overall,
@@ -299,6 +311,8 @@ def _observed(item: str, flat: dict[str, Any]) -> bool:
     for path, value in flat.items():
         # Flattening joins keys with "." so a key like /etc/ld.so.preload spans several segments.
         if item.startswith("/") and (f".{item}." in f".{path}." or f".{item}#" in f".{path}"):
+            return True
+        if len(item) >= 6 and item in path:
             return True
         for segment in path.split("."):
             if segment == item or segment.split("#", 1)[0] == item:
