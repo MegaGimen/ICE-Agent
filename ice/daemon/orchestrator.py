@@ -416,8 +416,8 @@ class Orchestrator:
             return
         res = report.result
         meta = self.cases.meta(case_id)
-        awaiting_observation = not meta.get("backward_followup_done") and not self._backward_observations(case)
-        if awaiting_observation and not meta.get("backward_followup_scheduled"):
+        awaiting_observation = report.observation_pending
+        if awaiting_observation and not meta.get("backward_followup_done") and not meta.get("backward_followup_scheduled"):
             delay = max(30.0, min(120.0, 2 * self.rt.conf.snapshot_interval_s))
             self.cases.save(case, backward_followup_scheduled=True)
             self._spawn(self._followup_backward, case_id, delay)
