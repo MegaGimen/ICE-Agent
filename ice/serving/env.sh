@@ -37,3 +37,8 @@ export VLLM_MARLIN_USE_ATOMIC_ADD="${VLLM_MARLIN_USE_ATOMIC_ADD:-1}"
 # 运行日志目录
 export ICE_RUN_DIR="${ICE_RUN_DIR:-$HOME/ice-build}"
 mkdir -p "$ICE_RUN_DIR"
+
+# FlashInfer / Triton 运行时要 JIT 编译（需 ninja + nvcc）。脚本直接调 venv 里的二进制、不 activate，
+# 所以要手动把 venv bin 和 CUDA bin 放进 PATH，否则报 "No such file or directory: 'ninja'"。
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$ICE_ENVS/vllm-env/bin:$CUDA_HOME/bin:$PATH"
