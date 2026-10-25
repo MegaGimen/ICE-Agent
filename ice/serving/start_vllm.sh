@@ -17,10 +17,12 @@ fi
 CMD=( "$VLLM_BIN" serve "$QWEN_MODEL"
   --port "$VLLM_PORT"
   --gpu-memory-utilization 0.35
-  --max-model-len 8192
+  --max-model-len "${VLLM_MAX_MODEL_LEN:-65536}"
   --max-num-seqs 2
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder )
+# max-model-len 默认 64k：OpenClaw 自带 system prompt + 工具定义约 16–18k tokens，8192 会 context overflow。
+# 混合注意力（40 层只有 10 层 full attn），KV 池 ~630k tokens，加大上下文不额外占内存。
 # 注意：不加 --reasoning-parser；不要把 sm_121 加进 vLLM 的 FP4_ARCHS。
 
 echo ">>> Marlin 后端环境："
