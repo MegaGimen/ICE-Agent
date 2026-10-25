@@ -75,14 +75,18 @@ def main() -> None:
         missing = set(wanted) - {name for name, _, _ in CASES}
         if missing:
             raise SystemExit(f"unknown fixtures: {sorted(missing)}")
-        orch.inject(entries)
+        warm = max(2, rt.conf.warmup_cycles)
+        orch.inject(entries, min_cycle=warm)
         rt.audit.write("replay", fixtures=wanted)
-        log.info("replaying %d synthetic entries: %s", len(entries), wanted)
+        log.info("replaying %d synthetic entries after %d real cycles: %s", len(entries), warm, wanted)
 
     if a.once:
         import time
         started = time.time()
         orch.cycle()
+        while orch.injection_pending and not stop.is_set():   # real cycles first, so the replay has a T0
+            stop.wait(5.0)
+            orch.cycle()
 
         def waiting() -> bool:   # this run's ASKs only, until the approval TTL runs out
             return any(p.status == "pending" and p.created >= started and time.time() - p.created < 600

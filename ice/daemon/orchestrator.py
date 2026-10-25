@@ -120,10 +120,20 @@ class Orchestrator:
             t.join(max(0.0, deadline - time.time()))
 
     # -- perception + gate ----------------------------------------------------
-    def inject(self, entries: List[ChangeEntry]) -> None:
-        """Replay synthetic change entries into the next cycle (testing without touching the host)."""
+    def inject(self, entries: List[ChangeEntry], min_cycle: int = 2) -> None:
+        """Replay synthetic change entries (testing without touching the host).
+
+        They enter no earlier than cycle `min_cycle`, after real snapshots exist, so the case has a
+        genuine T0 — as in real operation, where the snapshot before the first alert is T0.
+        """
         with self._inject_lock:
             self._injected.extend(entries)
+            self._inject_min_cycle = max(getattr(self, "_inject_min_cycle", 0), min_cycle)
+
+    @property
+    def injection_pending(self) -> bool:
+        with self._inject_lock:
+            return bool(self._injected)
 
     def sweep_expired(self) -> None:
         """An ASK nobody answered within the approval TTL is not executed; close out its case."""
@@ -151,7 +161,10 @@ class Orchestrator:
         entries = diff(self._prev, snap, self.baseline, learning=learning)
         entries += self.authlog.poll()
         with self._inject_lock:
-            injected, self._injected = self._injected, []
+            if self.cycles >= getattr(self, "_inject_min_cycle", 0):
+                injected, self._injected = self._injected, []
+            else:
+                injected = []
         entries += injected
         self._prev = snap
         self.cycles += 1
