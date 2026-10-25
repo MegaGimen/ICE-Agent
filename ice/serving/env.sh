@@ -2,8 +2,15 @@
 # ICE 公共环境变量 —— 所有 serving 脚本 source 本文件。
 # plan.md §7.1 / §8.3：模型路径必须用 HF_HUB_CACHE（HF_HOME 会找不到模型）。
 
-# 模型缓存（U 盘上的 HF 缓存目录）。可被外部覆盖。
-export HF_HUB_CACHE="${HF_HUB_CACHE:-/media/dell/TECLAST/models/ice_models}"
+# 模型缓存（HF 缓存目录）。优先用主盘 NVMe 副本（加载快），没有则退回 U 盘（exFAT，慢）。
+if [ -z "${HF_HUB_CACHE:-}" ]; then
+  if [ -d "$HOME/ice_models/models--jaredpalmer--kev-27b" ]; then
+    HF_HUB_CACHE="$HOME/ice_models"
+  else
+    HF_HUB_CACHE="/media/dell/TECLAST/models/ice_models"
+  fi
+fi
+export HF_HUB_CACHE
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
 export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 
