@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.env
+.env.*
+*.key
+*.pem
+*.crt
+*.sqlite3
+*.db
+deploy/local-secrets/
+plan.md
+colab.md

@@ -1,0 +1,53 @@
+{
+  "case": {
+    "case_id": "synthetic-persistence-001",
+    "hosts": ["lab-host"],
+    "ioc": ["example.invalid"],
+    "blast_radius": ["lab-host"]
+  },
+  "snapshots": {
+    "T0": {
+      "hosts": {
+        "lab-host": {
+          "cron": {"user_jobs": []},
+          "connections": {"destinations": []},
+          "services": {"web": {"health": "healthy"}}
+        }
+      }
+    },
+    "T1": {
+      "hosts": {
+        "lab-host": {
+          "cron": {"user_jobs": ["synthetic-autorun"]},
+          "connections": {"destinations": ["example.invalid"]},
+          "services": {"web": {"health": "healthy"}}
+        }
+      }
+    },
+    "T2": {
+      "hosts": {
+        "lab-host": {
+          "cron": {"user_jobs": []},
+          "connections": {"destinations": []},
+          "services": {"web": {"health": "healthy"}}
+        }
+      }
+    },
+    "observation": [
+      {
+        "hosts": {
+          "lab-host": {
+            "cron": {"user_jobs": []},
+            "connections": {"destinations": []},
+            "services": {"web": {"health": "healthy"}}
+          }
+        }
+      }
+    ]
+  },
+  "retest": {
+    "original": {"cron_changed": true, "unseen_destination": true, "authorized": false},
+    "variant": {"autostart_changed": true, "unseen_destination": true, "authorized": false},
+    "normal": {"cron_changed": true, "unseen_destination": false, "authorized": true}
+  }
+}
