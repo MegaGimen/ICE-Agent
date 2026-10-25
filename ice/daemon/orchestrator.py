@@ -206,6 +206,18 @@ class Orchestrator:
             return None
         return self.run_case(escalated, t1=snap)
 
+    def _active_lessons(self, limit: int = 20) -> List[str]:
+        """Promoted error-book lessons from past exercises (best effort)."""
+        try:
+            from ice.daemon.evolve.error_book import ErrorBook
+            book = ErrorBook(self.rt.conf.state_dir / "errorbook.sqlite3")
+            try:
+                return book.active_notes()[:limit]
+            finally:
+                book.close()
+        except Exception:  # noqa: BLE001
+            return []
+
     # -- investigation ----------------------------------------------------------
     def run_case(self, escalated: List[GateResult], t1: snap_mod.Snapshot) -> str:
         case_id = new_id("case")
@@ -236,15 +248,21 @@ class Orchestrator:
                 prior = graph.lookup(items, accounts, include_replay=replay)
             except Exception:  # noqa: BLE001
                 log.exception("graph lookup failed")
-        experience = [f"- {p['kind']} {p['object']} appeared in {p['case_id']} ({p['assessment']}, {p['created']}): "
-                      f"{(p.get('summary') or '')[:200]}" for p in prior[:10]]
+        correlation = [f"- {p['kind']} {p['object']} appeared in {p['case_id']} ({p['assessment']}, {p['created']})"
+                       for p in prior[:10]]
         # Retrieval before investigating (plan §3.2): technique notes + lessons from the error book.
         query = " ".join(f"{r.entry.value} {' '.join(str(v)[:200] for v in r.entry.untrusted.values())}"
                          for r in escalated[:5])
         knowledge = kb.technique_notes(query)
-        experience += kb.experience_notes(query)
+        experience = kb.experience_notes(query)
+        # Promoted error-book lessons (plan §5): these came from graded exercises, so include them all
+        # (there are few) in addition to any semantic hits, else a lesson never changes behaviour.
+        for note in self._active_lessons():
+            if note not in experience:
+                experience.append(note)
         msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated], knowledge=knowledge or None,
-                                   experience=experience or None, graph_available=graph is not None)
+                                   experience=experience or None, correlation=correlation or None,
+                                   graph_available=graph is not None)
         meta["knowledge"] = [n.split(" ", 2)[1] for n in knowledge]
         self.rt.audit.write("case.open", case=case_id, escalations=len(escalated))
         reply = agent.wake(case_id, msg)
