@@ -206,6 +206,37 @@ class Orchestrator:
             return None
         return self.run_case(escalated, t1=snap)
 
+    @staticmethod
+    def _gate_strong_malicious(escalated: List[GateResult]) -> Optional[GateResult]:
+        """Did Kev flag any escalated change as confidently malicious? (plan §7.2: Kev's verdict is soft,
+        but strong attribute scores are a deterministic backstop the LLM must not silently dismiss.)"""
+        for r in escalated:
+            strong_attrs = sum(1 for v in r.attributes.values() if v >= 0.90)
+            if (r.verdict == "malicious" and r.verdict_probs.get("malicious", 0.0) >= 0.80) or \
+               (r.verdict == "malicious" and strong_attrs >= 2):
+                return r
+        return None
+
+    def _apply_gate_floor(self, case: Case, assessment: Optional[str], escalated: List[GateResult]) -> Optional[str]:
+        """A 'benign' verdict cannot stand over a confident Kev 'malicious' one. Floor it to 'uncertain':
+        the case stays open and alerts (not dismissed) so a strongly-flagged change is never silently cleared.
+        Weak/suspicious escalations are unaffected — the investigation may still clear those as benign."""
+        if assessment != "benign":
+            return assessment
+        strong = self._gate_strong_malicious(escalated)
+        if strong is None:
+            return assessment
+        hot = ", ".join(f"{k}={v:.2f}" for k, v in sorted(strong.attributes.items(), key=lambda kv: -kv[1])[:3])
+        case.status = CaseStatus.INVESTIGATING          # reopen: benign had set DISMISSED
+        case.confidence = min(case.confidence, 0.5)
+        case.reason = (f"[gate override] Kev scored `{strong.entry.table}` malicious ({hot}) but the "
+                       f"investigation called the event benign; held at UNCERTAIN for review rather than "
+                       f"dismissed. Investigation's reasoning: " + case.reason)
+        case.add_timeline(f"gate floor: Kev malicious on {strong.entry.table} not confirmed benign -> uncertain")
+        self.rt.audit.write("gate_floor", case=case.case_id, table=strong.entry.table,
+                            verdict_probs=strong.verdict_probs, attributes=strong.attributes)
+        return "uncertain"
+
     def _active_lessons(self, limit: int = 20) -> List[str]:
         """Promoted error-book lessons from past exercises (best effort)."""
         try:
@@ -269,6 +300,7 @@ class Orchestrator:
         case, assessment = build_case(case_id, host, reply.text, [r.entry.to_dict() for r in escalated])
         if not reply.ok:
             case.add_timeline(f"agent error: {reply.error}")
+        assessment = self._apply_gate_floor(case, assessment, escalated)
         bad = [{"command": a.command, "problem": "uses shell syntax"} for a in case.proposed_actions if _SHELL.search(a.command)]
         if bad and assessment != "benign":
             revised = agent.wake(case_id, prompts.revise_actions_message(bad))
