@@ -13,8 +13,9 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
-from typing import Mapping, Protocol, TypedDict
+from typing import Callable, Mapping, Protocol, TypedDict
 from uuid import uuid4
+import math
 import re
 import shlex
 
@@ -33,6 +34,8 @@ class ApprovalRequest:
     target: str
     intent: str
     reason: str
+    scores: Mapping[str, float]
+    scored: bool
 
 
 class ApprovalQueue(Protocol):
@@ -64,6 +67,9 @@ _IRREVERSIBLE = frozenset(
 class SafetyGate:
     policy: SafetyPolicy
     approval_queue: ApprovalQueue | None = None
+    # Adapter owned by the intake side. It must score the full command/target,
+    # not the agent's explanation alone. Its output is never an approval.
+    score_provider: Callable[[str, str, str], Mapping[str, object]] | None = None
     _times: deque[float] = field(default_factory=deque, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
@@ -111,23 +117,36 @@ class SafetyGate:
             and program in self.policy.read_only_commands
             and not shell_syntax
         )
-        if read_only and not critical:
-            return _verdict("AUTO", "Authorized read-only command", legit=1, reversible=1, scope=1)
+        scores = _assess(self.score_provider, raw, target, explanation)
+        if scores is None and self.score_provider is not None:
+            return _verdict("DENY", "Safety scoring failed", scope=1)
+        if scores is not None:
+            if scores["legit"] < 0.40:
+                return _verdict("DENY", "Action lacks a legitimate basis", **_score_kwargs(scores))
+            if scores["scope_match"] < 0.50:
+                return _verdict("DENY", "Proposed effects exceed the stated scope", **_score_kwargs(scores))
+        if (
+            read_only and not critical and scores is not None
+            and scores["needs_human"] < 0.70 and scores["reversible"] >= 0.70
+        ):
+            return _verdict("AUTO", "Authorized low-impact command", **_score_kwargs(scores))
 
         reason = (
             "Critical asset requires approval" if critical else
             "Irreversible action requires approval" if irreversible else
-            "Command requires human review"
+            "Command requires human review" if scores is not None else
+            "Safety score unavailable; human review required"
         )
         if self.approval_queue is None:
             return _verdict("DENY", "Approval channel is unavailable", reversible=0 if irreversible else 0.5, scope=1)
         request_id = str(uuid4())
-        request = ApprovalRequest(request_id, raw, target, explanation, reason)
+        shown_scores = scores or {"legit": 0.5, "needs_human": 1.0, "reversible": 0.0 if irreversible else 0.5, "scope_match": 1.0}
+        request = ApprovalRequest(request_id, raw, target, explanation, reason, shown_scores, scores is not None)
         try:
             self.approval_queue.put_nowait(request)
         except Exception:
             return _verdict("DENY", "Approval request could not be queued", reversible=0 if irreversible else 0.5, scope=1)
-        return _verdict("ASK", reason, legit=0.5, human=1, reversible=0 if irreversible else 0.5, scope=1, request_id=request_id)
+        return _verdict("ASK", reason, **_score_kwargs(shown_scores), request_id=request_id)
 
 
 def safety_gate(
@@ -155,6 +174,34 @@ def _extract_command_and_target(command: str | Mapping[str, object]) -> tuple[st
 
 def _matches(target: str, patterns: tuple[str, ...]) -> bool:
     return any(fnmatchcase(target, pattern) for pattern in patterns)
+
+
+def _assess(
+    provider: Callable[[str, str, str], Mapping[str, object]] | None,
+    command: str,
+    target: str,
+    intent: str,
+) -> dict[str, float] | None:
+    if provider is None:
+        return None
+    try:
+        result = provider(command, target, intent)
+        scores = {name: float(result[name]) for name in ("legit", "needs_human", "reversible", "scope_match")}
+    except Exception:
+        # A failed or unavailable scoring backend must not result in AUTO.
+        return None
+    if any(not math.isfinite(value) or not 0 <= value <= 1 for value in scores.values()):
+        return None
+    return scores
+
+
+def _score_kwargs(scores: Mapping[str, float]) -> dict[str, float]:
+    return {
+        "legit": scores["legit"],
+        "human": scores["needs_human"],
+        "reversible": scores["reversible"],
+        "scope": scores["scope_match"],
+    }
 
 
 def _verdict(

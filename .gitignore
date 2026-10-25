@@ -6,5 +6,8 @@ __pycache__/
 *.key
 *.pem
 *.crt
+*.sqlite3
+*.db
+deploy/local-secrets/
 plan.md
 colab.md

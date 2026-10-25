@@ -1,0 +1,18 @@
+# Replace PRIVATE_IP and ABSOLUTE_WORKTREE_PATH before installation.
+# The ICE MCP daemon listens only on 127.0.0.1:8083 in this example.
+server {
+    listen PRIVATE_IP:8443 ssl;
+    server_name _;
+    ssl_certificate ABSOLUTE_WORKTREE_PATH/deploy/local-secrets/mcp.crt;
+    ssl_certificate_key ABSOLUTE_WORKTREE_PATH/deploy/local-secrets/mcp.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location /mcp {
+        proxy_pass http://127.0.0.1:8083;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Authorization $http_authorization;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 120s;
+    }
+}
