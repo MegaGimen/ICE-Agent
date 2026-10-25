@@ -15,6 +15,8 @@ ExecStartPre=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
 ExecStartPre=/bin/bash -c 'source /home/dell/ICE/ice/serving/env.sh && "$VLLM_PY" /home/dell/ICE/ice/serving/free_mem.py 60'
 ExecStart=/home/dell/ICE/ice/serving/start_kev.sh --fg
 ExecStartPost=/home/dell/ICE/ice/serving/wait_ready.sh kev 900
+# Loading ~48 GB of Kev weights refills the page cache; drop it so both models keep runtime headroom.
+ExecStartPost=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
 TimeoutStartSec=1000
 KillMode=control-group
 TimeoutStopSec=60
