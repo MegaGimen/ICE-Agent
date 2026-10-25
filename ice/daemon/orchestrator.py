@@ -135,6 +135,8 @@ class Orchestrator:
         They enter no earlier than cycle `min_cycle`, after real snapshots exist, so the case has a
         genuine T0 — as in real operation, where the snapshot before the first alert is T0.
         """
+        for e in entries:
+            e.replay = True   # synthetic: excluded from real correlation and from the error book
         with self._inject_lock:
             self._injected.extend(entries)
             self._inject_min_cycle = max(getattr(self, "_inject_min_cycle", 0), min_cycle)
@@ -214,7 +216,8 @@ class Orchestrator:
         host = self.rt.conf.hostname
         escalated = sorted(escalated, key=lambda r: r.priority != "high")
         t0 = self.store.before(t1.ts)
-        meta = {"t0": t0.ts if t0 else None, "t1": t1.ts,
+        replay = any(getattr(r.entry, "replay", False) for r in escalated)
+        meta = {"t0": t0.ts if t0 else None, "t1": t1.ts, "replay": replay,
                 "trigger_keys": [{"table": r.entry.table, "key": r.entry.field} for r in escalated]}
         graph = getattr(self.rt, "graph", None)
         accounts = set(t1.rows("accounts")) if "accounts" not in t1.errors else None
@@ -226,7 +229,7 @@ class Orchestrator:
                 items += [x for x in (e.src_ip, e.provenance.user, e.provenance.who, e.field.split("#", 1)[0]) if x]
                 items += [v for v in e.untrusted.values() if isinstance(v, str) and len(v) < 300 and v.startswith("/")]
             try:
-                prior = graph.lookup(items, accounts)
+                prior = graph.lookup(items, accounts, include_replay=replay)
             except Exception:  # noqa: BLE001
                 log.exception("graph lookup failed")
         experience = [f"- {p['kind']} {p['object']} appeared in {p['case_id']} ({p['assessment']}, {p['created']}): "
@@ -269,8 +272,9 @@ class Orchestrator:
         related: List[Dict[str, Any]] = []
         if graph is not None:
             try:
-                written = graph.record_case(case, assessment, accounts)
-                related = graph.related_cases(case)
+                written = graph.record_case(case, assessment, accounts,
+                                            source=f"replay:{host}" if replay else None)
+                related = graph.related_cases(case, include_replay=replay)
                 self.rt.audit.write("graph.write", case=case_id, **written, related=len(related))
             except Exception:  # noqa: BLE001
                 log.exception("graph write failed")

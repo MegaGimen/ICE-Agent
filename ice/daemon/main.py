@@ -33,6 +33,70 @@ def _start_mcp(rt: Runtime) -> None:
     log.info("MCP server on http://%s:%s/mcp", rt.conf.mcp_host, rt.conf.mcp_port)
 
 
+HEALTH = {
+    "vLLM": "http://localhost:8000/health",
+    "Kev": "http://localhost:8010/v1/models",
+    "embedding service": "http://127.0.0.1:8020/health",
+}
+
+
+def _up(url: str) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _mcp_proxy_up() -> bool:
+    import socket
+    try:
+        with socket.create_connection((os.environ.get("ICE_MCP_PRIVATE_IP", "172.18.0.1"), 8443), timeout=3):
+            return True
+    except OSError:
+        return False
+
+
+def _health() -> dict:
+    h = {name: _up(url) for name, url in HEALTH.items()}
+    h["MCP proxy"] = _mcp_proxy_up()
+    return h
+
+
+def _wait_for_models(stop: threading.Event, timeout: float = 1800) -> bool:
+    """The orchestrator must not start cycles against missing models: every change would be escalated
+    unjudged and every investigation would fail. Wait (and say so once) until vLLM and Kev answer."""
+    import time
+    from ice.daemon.notify import status
+    t0, told = time.time(), False
+    while not stop.is_set():
+        h = _health()
+        if h["vLLM"] and h["Kev"]:
+            return True
+        if not told:
+            status.post("daemon", "waiting", "models not ready: " + ", ".join(k for k in ("vLLM", "Kev") if not h[k]))
+            told = True
+        if time.time() - t0 > timeout:
+            status.post("daemon", "failed", f"models still not ready after {timeout:.0f}s")
+            return False
+        stop.wait(10)
+    return False
+
+
+def _watch_health(stop: threading.Event, interval: float = 60) -> None:
+    """Report each component going down or coming back once, instead of failing silently."""
+    from ice.daemon.notify import status
+    last = _health()
+    while not stop.wait(interval):
+        now = _health()
+        for name, up in now.items():
+            if up != last.get(name):
+                status.post(name, "recovered" if up else "degraded",
+                            "answering again" if up else "not answering; ICE keeps monitoring, affected steps degrade")
+        last = now
+
+
 def _watch_kill_switch(rt: Runtime, stop: threading.Event) -> None:
     flag = rt.conf.state_dir / "KILL"
     state = None
@@ -68,6 +132,18 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     threading.Thread(target=_watch_kill_switch, args=(rt, stop), name="kill-switch", daemon=True).start()
     _start_mcp(rt)
+    if not a.once and not a.replay:   # resident service: report readiness and keep watching health
+        from ice.daemon.notify import status
+        if not _wait_for_models(stop):
+            return
+        h = _health()
+        graph = rt.graph.stats() if rt.graph else {}
+        status.post("daemon", "online", "monitoring every %.0fs · %s · approvals %s · graph %d cases · kill switch %s" % (
+            rt.conf.snapshot_interval_s, ", ".join(f"{k} {'up' if v else 'DOWN'}" for k, v in h.items()),
+            "via ICE Gate" if rt.approvals else "NOT configured (ASK -> DENY)", graph.get("Incident", 0),
+            "ON" if (rt.conf.state_dir / "KILL").exists() else "off"))
+        threading.Thread(target=_watch_health, args=(stop,), name="health", daemon=True).start()
+        signal.signal(signal.SIGTERM, lambda *_: (status.post("daemon", "stopping", "SIGTERM"), stop.set()))
 
     if a.replay:
         from ice.fixtures.gate_cases import CASES

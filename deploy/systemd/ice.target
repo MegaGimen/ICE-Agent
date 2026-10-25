@@ -1,0 +1,6 @@
+[Unit]
+Description=ICE (all services, in order: vLLM -> Kev -> embed + MCP proxy -> daemon)
+Wants=ice-vllm.service ice-kev.service ice-embed.service ice-mcp-proxy.service ice-daemon.service
+
+[Install]
+WantedBy=multi-user.target

@@ -1,9 +1,10 @@
 [Unit]
 Description=ICE host daemon (perception, detection gate, orchestrator, safety gate, executor, ICE Gate)
-# vLLM (:8000) and Kev (:8010) are started by ice/serving/start_*.sh; the daemon tolerates them being late
-# (Kev down -> changes are escalated unjudged; agent errors are recorded on the case).
-After=network-online.target ice-embed.service ice-mcp-proxy.service
-Wants=ice-embed.service ice-mcp-proxy.service
+# Starts last: after both models answer (ice-vllm/ice-kev block in ExecStartPost until ready). The daemon
+# also re-checks the models itself before its first cycle and reports degraded/recovered to Slack.
+After=network-online.target ice-vllm.service ice-kev.service ice-embed.service ice-mcp-proxy.service
+Wants=ice-vllm.service ice-kev.service ice-embed.service ice-mcp-proxy.service
+OnFailure=ice-status@%n.service
 
 [Service]
 User=root
@@ -17,4 +18,4 @@ KillMode=mixed
 TimeoutStopSec=30
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=ice.target

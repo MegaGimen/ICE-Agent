@@ -26,7 +26,9 @@ def main() -> None:
     for d in CaseStore(state / "cases").all():
         case = Case.from_dict(d)
         case.ioc, case.blast_radius = _idents(case.ioc), _idents(case.blast_radius)   # older cases kept prose
-        written = graph.record_case(case, (d.get("_ice") or {}).get("assessment"), accounts)
+        meta = d.get("_ice") or {}
+        written = graph.record_case(case, meta.get("assessment"), accounts,
+                                    source=f"replay:{os.uname().nodename}" if meta.get("replay") else None)
         print(f"{case.case_id}: {written}")
         n += 1
     print(f"{n} cases; graph now {graph.stats()}")

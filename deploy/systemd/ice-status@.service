@@ -1,0 +1,8 @@
+[Unit]
+Description=ICE status notification for %i
+
+[Service]
+Type=oneshot
+User=dell
+WorkingDirectory=/home/dell/ICE
+ExecStart=/home/dell/ice-envs/daemon-env/bin/python -m ice.daemon.notify.status %i failed "see: journalctl -u %i"

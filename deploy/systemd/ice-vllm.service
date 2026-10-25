@@ -1,0 +1,23 @@
+[Unit]
+Description=ICE main model: vLLM Qwen3.6-35B-A3B-NVFP4 (:8000) — starts first
+After=network-online.target
+OnFailure=ice-status@%n.service
+
+[Service]
+User=dell
+WorkingDirectory=/home/dell/ICE
+# Page cache shrinks CUDA-visible memory on unified memory: drop it before vLLM sizes its pool (plan §8.3).
+ExecStartPre=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+ExecStartPre=/home/dell/ice-envs/daemon-env/bin/python -m ice.daemon.notify.status vllm starting "loading weights; ready in ~3-6 min"
+ExecStart=/home/dell/ICE/ice/serving/start_vllm.sh --fg
+# Dependents (Kev, daemon) wait for this: the unit is "started" only once /health answers.
+ExecStartPost=/home/dell/ICE/ice/serving/wait_ready.sh vllm 1200
+TimeoutStartSec=1300
+# The whole cgroup is stopped, so the EngineCore child can no longer be orphaned holding ~44 GB.
+KillMode=control-group
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=ice.target

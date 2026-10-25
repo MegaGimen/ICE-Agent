@@ -1,0 +1,22 @@
+[Unit]
+Description=ICE decision model: Kev-27B (127.0.0.1:8010) — starts after vLLM is ready
+After=ice-vllm.service
+Wants=ice-vllm.service
+OnFailure=ice-status@%n.service
+
+[Service]
+User=dell
+WorkingDirectory=/home/dell/ICE
+ExecStartPre=/home/dell/ice-envs/daemon-env/bin/python -m ice.daemon.notify.status kev starting "Kev-27B loading after vLLM"
+# Kev-27B needs ~64 GB of unified memory; refuse to start (and say so) rather than OOM the host.
+ExecStartPre=/bin/bash -c 'source /home/dell/ICE/ice/serving/env.sh && "$VLLM_PY" /home/dell/ICE/ice/serving/free_mem.py 60'
+ExecStart=/home/dell/ICE/ice/serving/start_kev.sh --fg
+ExecStartPost=/home/dell/ICE/ice/serving/wait_ready.sh kev 900
+TimeoutStartSec=1000
+KillMode=control-group
+TimeoutStopSec=60
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=ice.target

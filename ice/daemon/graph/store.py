@@ -111,9 +111,11 @@ class Graph:
             {"ka": a[2], "kb": b[2], "now": now, "src": source or self.source, "c": float(confidence)})
 
     # -- write path (case creation only) ----------------------------------------------
-    def record_case(self, case: Any, assessment: Optional[str], accounts: Optional[set] = None) -> Dict[str, int]:
+    def record_case(self, case: Any, assessment: Optional[str], accounts: Optional[set] = None,
+                    source: Optional[str] = None) -> Dict[str, int]:
         """Upsert a case, its host, techniques, and every object it names (IOCs, blast radius,
-        trigger provenance). Returns counts for the audit log."""
+        trigger provenance). Returns counts for the audit log. `source` overrides the edge source
+        (e.g. "replay:<host>" for synthetic replays, "<other ICE host>" for shared intel)."""
         d = case.to_dict() if hasattr(case, "to_dict") else dict(case)
         cid = d["case_id"]
         conf = float(d.get("confidence") or 0.0)
@@ -125,10 +127,10 @@ class Graph:
         n = {"objects": 0, "techniques": 0}
         for host in d.get("hosts") or []:
             self._merge_node("Host", host)
-            self._link("ON_HOST", ("Incident", "case_id", cid), ("Host", "name", host), conf)
+            self._link("ON_HOST", ("Incident", "case_id", cid), ("Host", "name", host), conf, source)
         for t in d.get("attck") or []:
             self._merge_node("Technique", t)
-            self._link("MAPS_TO", ("Incident", "case_id", cid), ("Technique", "id", t), conf)
+            self._link("MAPS_TO", ("Incident", "case_id", cid), ("Technique", "id", t), conf, source)
             n["techniques"] += 1
         objects = set()
         for item in list(d.get("ioc") or []) + list(d.get("blast_radius") or []):
@@ -152,16 +154,16 @@ class Graph:
                     if ip and ip[0] == "IP":
                         self._merge_node("Process", proc)
                         self._merge_node("IP", ip[1])
-                        self._link("CONNECTED_TO", ("Process", "key", proc), ("IP", "key", ip[1]), conf)
+                        self._link("CONNECTED_TO", ("Process", "key", proc), ("IP", "key", ip[1]), conf, source)
                 parent = prov.get("parent")
                 if parent and parent.startswith("/"):
                     pp = f"{parent}@?"
                     self._merge_node("Process", pp)
                     self._merge_node("Process", proc)
-                    self._link("SPAWNED", ("Process", "key", pp), ("Process", "key", proc), conf)
+                    self._link("SPAWNED", ("Process", "key", pp), ("Process", "key", proc), conf, source)
         for table, key in objects:
             self._merge_node(table, key)
-            self._link("INVOLVES", ("Incident", "case_id", cid), (table, "key", key), conf)
+            self._link("INVOLVES", ("Incident", "case_id", cid), (table, "key", key), conf, source)
             n["objects"] += 1
         return n
 
@@ -173,28 +175,32 @@ class Graph:
             raise ValueError("graph_query is read-only: one MATCH/RETURN statement, no writes")
         return [{k: _plain(v) for k, v in row.items()} for row in self._rows(q)]
 
-    def related_cases(self, case: Any) -> List[Dict[str, Any]]:
-        """Earlier cases sharing any object with this one — 'this IP was seen in case-012'."""
+    def related_cases(self, case: Any, include_replay: bool = False) -> List[Dict[str, Any]]:
+        """Earlier cases sharing any object with this one — 'this IP was seen in case-012'.
+        Synthetic replay cases are left out of real correlation unless asked for."""
         d = case.to_dict() if hasattr(case, "to_dict") else dict(case)
         out = []
+        where = "" if include_replay else " AND NOT r.source STARTS WITH 'replay'"
         for table in OBJECT_TABLES:
             out += self._rows(
                 f"MATCH (c:Incident {{case_id: $id}})-[:INVOLVES]->(o:{table})<-[r:INVOLVES]-(p:Incident) "
-                "WHERE p.case_id <> $id "
+                "WHERE p.case_id <> $id" + where + " "
                 "RETURN p.case_id AS case_id, p.assessment AS assessment, p.created AS created, "
                 f"'{table}' AS kind, o.key AS object, r.source AS source ORDER BY p.created",
                 {"id": d["case_id"]})
         return out
 
-    def lookup(self, items: List[str], accounts: Optional[set] = None) -> List[Dict[str, Any]]:
+    def lookup(self, items: List[str], accounts: Optional[set] = None,
+               include_replay: bool = False) -> List[Dict[str, Any]]:
         """Past cases involving any of these identifiers (used before an investigation starts)."""
         out = []
+        where = "" if include_replay else " WHERE NOT r.source STARTS WITH 'replay'"
         for item in dict.fromkeys(items):
             c = classify(item, accounts)
             if not c:
                 continue
             out += self._rows(
-                f"MATCH (p:Incident)-[r:INVOLVES]->(o:{c[0]} {{key: $k}}) "
+                f"MATCH (p:Incident)-[r:INVOLVES]->(o:{c[0]} {{key: $k}})" + where + " "
                 "RETURN p.case_id AS case_id, p.assessment AS assessment, p.created AS created, p.summary AS summary, "
                 f"'{c[0]}' AS kind, o.key AS object, r.source AS source ORDER BY p.created",
                 {"k": c[1]})

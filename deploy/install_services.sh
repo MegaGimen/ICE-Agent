@@ -32,7 +32,15 @@ http {
 }
 CONF
 
-# 3. stop the hand-started development processes these units replace
+# 3. stop the hand-started development processes these units replace (models included: systemd starts
+#    them in order, vLLM -> Kev -> embed/proxy -> daemon, and posts each step to Slack)
+systemctl disable --now ice-daemon.service ice-embed.service ice-mcp-proxy.service 2>/dev/null || true
+if ! systemctl is-active -q ice-vllm.service; then
+  sudo -u "$OWNER" -H "$REPO/ice/serving/stop_vllm.sh" || true
+fi
+if ! systemctl is-active -q ice-kev.service; then
+  fuser -k 8010/tcp 2>/dev/null || true   # never `pkill -f kev.serve` (plan §8.3)
+fi
 RUN="/home/$OWNER/ice-build/mcp-link"
 if [ -f "$RUN/nginx.pid" ] && kill -0 "$(cat "$RUN/nginx.pid")" 2>/dev/null; then
   nginx -c "$RUN/nginx.conf" -p "$RUN" -s quit || true
@@ -41,8 +49,10 @@ pkill -u "$OWNER" -f 'ice.kb.embed_service' || true
 fuser -k 8083/tcp 2>/dev/null || true
 sleep 2
 
-# 4. units
-install -m 644 "$D"/systemd/ice-*.service /etc/systemd/system/
+# 4. units: ice.target owns the set; `systemctl start|stop|restart ice.target` handles all of it in order
+install -m 644 "$D"/systemd/ice-*.service "$D"/systemd/ice.target /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now ice-embed.service ice-mcp-proxy.service ice-daemon.service
-systemctl --no-pager --lines=0 status ice-embed.service ice-mcp-proxy.service ice-daemon.service | grep -E '●|Active:'
+systemctl enable ice.target ice-vllm.service ice-kev.service ice-embed.service ice-mcp-proxy.service ice-daemon.service
+systemctl start --no-block ice.target
+echo "ice.target starting (vLLM -> Kev -> embed/proxy -> daemon); progress is posted to Slack."
+echo "  watch: systemctl list-units 'ice*'   logs: journalctl -u ice-vllm -u ice-kev -u ice-daemon -f"
