@@ -88,8 +88,10 @@ def main() -> None:
             stop.wait(5.0)
             orch.cycle()
 
+        ttl = rt.approvals.policy.request_ttl_seconds if rt.approvals else 600
+
         def waiting() -> bool:   # this run's ASKs only, until the approval TTL runs out
-            return any(p.status == "pending" and p.created >= started and time.time() - p.created < 600
+            return any(p.status == "pending" and p.created >= started and time.time() - p.created < ttl
                        for p in rt.pending.items.values())
         if listener and waiting():
             log.info("waiting for ICE Gate decisions (Ctrl-C to stop)")

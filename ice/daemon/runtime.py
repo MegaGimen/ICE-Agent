@@ -9,6 +9,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -90,7 +91,8 @@ class Runtime:
             self.approvals = ApprovalStore(
                 sd / "approvals.sqlite3",
                 ApprovalPolicy(team_id=self.conf.slack_team_id, channel_id=self.conf.slack_alert_channel,
-                               allowed_user_ids=frozenset(self.conf.slack_approver_ids)),
+                               allowed_user_ids=frozenset(self.conf.slack_approver_ids),
+                               request_ttl_seconds=int(os.environ.get("ICE_APPROVAL_TTL", "600"))),
                 approval_guard=self.gate.current_policy_allows,
             )
             self.gate.approval_queue = self.approvals
@@ -102,7 +104,7 @@ class Runtime:
         self._case_lock = threading.Lock()
         self.current_case: Optional[str] = None
         # Read-only tool calls per case (plan risk: an agent that keeps exploring burns minutes per call).
-        self.tool_budget = int(__import__("os").environ.get("ICE_TOOL_BUDGET", "12"))
+        self.tool_budget = int(os.environ.get("ICE_TOOL_BUDGET", "12"))
         self._tool_calls: Dict[Optional[str], int] = {}
         # Hooks set by the ICE Gate service: called on a new ASK and on an explanation.
         self.on_ask: List[Callable[[PendingAction], None]] = []

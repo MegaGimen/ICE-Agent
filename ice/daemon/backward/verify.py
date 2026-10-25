@@ -108,7 +108,9 @@ class BackwardVerifier:
             failures += int(recurrence)
 
         for item in _indicators(_field(case, "blast_radius", ())):
-            if not any(item == path or item in path.split(".") for path in t2):
+            # Observable in any snapshot: the probes above cover it. Absent from all of T0/T1/T2: forward
+            # named an object the snapshots never saw, which backward cannot verify.
+            if not any(_observed(item, snapshot) for snapshot in (t0, t1, t2)):
                 coverage_gap = True
                 evidence.append({"probe": "coverage", "target": item, "result": "unobserved"})
 
@@ -262,12 +264,29 @@ def _indicators(value: Any) -> tuple[str, ...]:
     return tuple(str(item) for item in value if isinstance(item, (str, int)) and str(item))
 
 
+def _observed(item: str, flat: dict[str, Any]) -> bool:
+    """Item names a snapshot object: a path segment, a natural key before its '#hash' suffix, or a value."""
+    for path, value in flat.items():
+        # Flattening joins keys with "." so a key like /etc/ld.so.preload spans several segments.
+        if item.startswith("/") and (f".{item}." in f".{path}." or f".{item}#" in f".{path}"):
+            return True
+        for segment in path.split("."):
+            if segment == item or segment.split("#", 1)[0] == item:
+                return True
+        if _contains_indicator(value, item):
+            return True
+    return False
+
+
 def _contains_indicator(value: Any, indicator: str) -> bool:
     if isinstance(value, Mapping):
         return any(_contains_indicator(part, indicator) for part in value.values())
     if isinstance(value, (list, tuple, set)):
         return any(_contains_indicator(part, indicator) for part in value)
-    return str(value) == indicator
+    text = str(value)
+    # Long indicators also match inside values (an IP inside a cron command); short ones only exactly,
+    # so "1" or "sh" cannot match everything.
+    return text == indicator or (len(indicator) >= 6 and indicator in text)
 
 
 def _unit(value: Any) -> float:

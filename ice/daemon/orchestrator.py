@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -153,11 +154,20 @@ class Orchestrator:
                 if not [x for x in self.rt.pending.items.values() if x.case_id == case.case_id and x.status == "pending"]:
                     self.finish(case.case_id)
 
+    def _learn_own_traffic(self, snap: snap_mod.Snapshot) -> None:
+        """The daemon's own connections (Slack API, Socket Mode) are known by pid, which an attacker
+        cannot borrow: add them to the baseline before diffing so they are never reported."""
+        me = str(os.getpid())
+        own = [k for k, m in snap.meta.get("connections", {}).items() if str(m.get("pid")) == me]
+        if own:
+            self.baseline.add("connections", own, snap.ts)
+
     def cycle(self) -> Optional[str]:
         self.sweep_expired()
         snap = snap_mod.collect()
         self.store.save(snap)
         learning = self._first_run and self.cycles < self.rt.conf.warmup_cycles
+        self._learn_own_traffic(snap)
         entries = diff(self._prev, snap, self.baseline, learning=learning)
         entries += self.authlog.poll()
         with self._inject_lock:

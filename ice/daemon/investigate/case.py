@@ -56,6 +56,34 @@ def _strs(v: Any, limit: int = 50, width: int = 500) -> List[str]:
     return [str(x)[:width] for x in v if isinstance(x, (str, int, float)) and str(x).strip()][:limit]
 
 
+_LABEL = re.compile(r"^\s*[A-Za-z\u4e00-\u9fff _/-]{1,24}[:：]\s+(?=\S)")
+_COMMENT = re.compile(r"\s+(?:—|–|--|-|\(|（|#\s).*$")
+
+
+_LABEL_WORDS = {"ip", "url", "file", "path", "user", "username", "account", "domain", "host", "hash", "sha256",
+                "unit", "service", "process", "key", "cron"}
+
+
+def _ident(v: str) -> str:
+    """Reduce 'IP: 45.9.1.2 (C2 server)' or '/var/spool/cron/crontabs/www-data — cron file' to the bare
+    identifier, so backward can match it against snapshot keys and values."""
+    v = _LABEL.sub("", str(v).strip(), count=1)
+    v = _COMMENT.sub("", v).strip().strip("`'\"")
+    parts = v.split()
+    if len(parts) > 1 and parts[0].lower() in _LABEL_WORDS:   # "IP 45.9.1.2" without a colon
+        parts = parts[1:]
+    return parts[0].strip("`'\"") if parts else ""
+
+
+def _idents(v: Any, limit: int = 50) -> List[str]:
+    out: List[str] = []
+    for x in _strs(v, limit):
+        i = _ident(x)
+        if i and i not in out:
+            out.append(i)
+    return out
+
+
 def _float(v: Any) -> float:
     try:
         return max(0.0, min(1.0, float(v)))
@@ -78,9 +106,9 @@ def build_case(case_id: str, host: str, reply_text: str, triggers: List[Dict[str
         assessment = "uncertain"
     case.confidence = _float(obj.get("confidence"))
     case.attck = [t for t in _strs(obj.get("attck"), 20, 12) if _ATTCK.match(t)]
-    case.ioc = _strs(obj.get("ioc"))
+    case.ioc = _idents(obj.get("ioc"))
     case.reason = str(obj.get("reason", ""))[:4000]
-    case.blast_radius = _strs(obj.get("blast_radius"))
+    case.blast_radius = _idents(obj.get("blast_radius"))
     hosts = _strs(obj.get("hosts"), 10, 255)
     if hosts:
         case.hosts = sorted(set(hosts) | {host})

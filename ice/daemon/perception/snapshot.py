@@ -13,8 +13,10 @@ snapshots into `kind.table.key.field` paths and compare them directly.
 """
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import ipaddress
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -194,6 +196,14 @@ class Snapshot:
         return cls(ts=d["ts"], data=d.get("data", {}), errors=d.get("errors", {}), meta=d.get("meta", {}))
 
 
+# Infrastructure whose HTTPS egress rotates across cloud IP ranges (Slack, tailscale control plane): their
+# outbound public 443 traffic is bucketed as one network, so a new cloud /24 is not "never seen". A new
+# executable, port, or direction from them is still reported. Generic interpreters (python, node) are
+# deliberately absent: any user's malware would share that path.
+TRUSTED_EGRESS = [g for g in os.environ.get(
+    "ICE_TRUSTED_EGRESS", "/opt/openshell/bin/*,/usr/sbin/tailscaled").split(",") if g]
+
+
 def _connection_key(r: Row, listening: set) -> Tuple[str, Direction, str]:
     proto = "tcp" if r.get("protocol") == "6" else "udp"
     inbound = (proto, r.get("local_port")) in listening
@@ -201,6 +211,10 @@ def _connection_key(r: Row, listening: set) -> Tuple[str, Direction, str]:
     bucket, private = ip_bucket(r.get("remote_address", ""))
     port = r.get("local_port") if inbound else r.get("remote_port")
     scope = "private" if private else "public"
+    exe = r.get("path") or ""
+    if (not inbound and not private and port == "443"
+            and any(fnmatch.fnmatchcase(exe, g) for g in TRUSTED_EGRESS)):
+        bucket = "*"
     key = f"{_proc_label(r.get('path', ''), r.get('name', ''))}@{r.get('username')}|{direction.value}|{proto}/{port}|{scope}:{bucket}"
     return key, direction, bucket
 

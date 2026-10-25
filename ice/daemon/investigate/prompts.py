@@ -45,9 +45,9 @@ CASE_TEMPLATE = {
     "attck": ["T1053.003"],
     "timeline": [{"ts": "ISO8601", "event": "what happened, in order"}],
     "hosts": ["hostname"],
-    "ioc": ["indicators: IPs, domains, file sha256, file paths, usernames"],
+    "ioc": ["bare indicators only, one per item, no labels or comments: 45.9.1.2, evil.example.com, /tmp/x.sh, <sha256>"],
     "reason": f"the attack story in plain {_LANG_NAME}: how the steps connect, and why this is (or is not) an attack",
-    "blast_radius": ["every object the attacker created or changed that remediation must undo: file paths, cron entries, keys, accounts, units, processes, connections"],
+    "blast_radius": ["bare identifiers only, one per item, no comments: every object the attacker created or changed that remediation must undo — file paths (/var/spool/cron/crontabs/www-data), account names, unit names (x.service), IPs"],
     "proposed_actions": [{"command": "exact command", "intent": f"why, in plain {_LANG_NAME}", "targets": ["object it affects"]}],
 }
 
