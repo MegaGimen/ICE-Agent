@@ -4,9 +4,10 @@ These steps are prepared from the local ICE plan. They have not been performed o
 the GB10. Confirm the current private IP and the daemon's loopback MCP port
 before applying the reverse proxy template.
 
-1. On the GB10, run `nemoclaw host probe`. Confirm the offline bundle hash and
-   model cache layout described in `plan.md` §8.2; keep the bundle and models
-   outside this repository.
+1. On the GB10, run `nemoclaw host probe`. Run
+   `bash deploy/check-offline-bundle.sh <ice_offline_bundle.tar> <ice_models-dir>`
+   to verify the bundle SHA-256 and required cache directories from `plan.md`
+   §8.2. Keep the bundle and models outside this repository.
 2. Before onboarding, run `bash deploy/create-local-ca.sh <private-MCP-IP>` on
    the GB10. The script creates an IP SAN server certificate and a local CA in
    ignored `deploy/local-secrets/`. Review the printed certificate verification.

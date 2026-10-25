@@ -132,6 +132,8 @@ class BackwardVerifier:
             for value in t1.values()
         )
         if not attack_observed or coverage_gap:
+            deterministic_score = 0.0
+        if not attack_observed or coverage_gap:
             outcome = "indeterminate"
         elif recurrence or residue:
             outcome = "partial" if failures < probes else "not_cleared"
@@ -142,6 +144,8 @@ class BackwardVerifier:
         confidence = min(1.0, (0.65 if probes else 0.0) + 0.35 * judge_confidence)
         if not observations:
             confidence = min(confidence, 0.75)
+        if not attack_observed or coverage_gap:
+            confidence = min(confidence, 0.4)
         extend = confidence < 0.70 or residue or recurrence or outcome == "indeterminate"
         deeper = ("verify_system_files", "check_deleted_running_processes", "inspect_recent_system_changes") if extend else ()
         overall = 0.7 * deterministic_score + 0.3 * quality_score
@@ -169,10 +173,11 @@ class BackwardVerifier:
         residuals = [item for item in evidence if item.get("result") in {
             "residual_change", "present", "reappeared", "unobserved", "unexplained_t2_change"
         }]
-        blast_radius = set(_indicators(_field(case, "blast_radius", ())))
+        explicitly_listed = set(_indicators(_field(case, "blast_radius", ()))) | set(
+            _indicators(_field(case, "ioc", ()))
+        )
         missed = [item for item in residuals if item.get("probe") == "full_snapshot"
-                  and not any(target == item.get("path") or target in str(item.get("path", "")).split(".")
-                              for target in blast_radius)]
+                  and item.get("path") not in explicitly_listed]
         contract_result = BackwardResult(
             verdict=verdict,
             total_score=overall,
