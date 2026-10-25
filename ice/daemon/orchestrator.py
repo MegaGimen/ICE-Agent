@@ -81,6 +81,9 @@ class Notifier:
     def backward_report(self, case: Case, report: Any) -> None:
         log.info("BACKWARD %s %s", case.case_id, getattr(report, "outcome", report))
 
+    def mark_expired(self, request_id: str) -> None:
+        log.info("EXPIRED %s", request_id)
+
 
 class Orchestrator:
     def __init__(self, rt: Runtime, notifier: Optional[Notifier] = None):
@@ -99,11 +102,22 @@ class Orchestrator:
         self._first_run = not self.baseline.size()
         self._case_lock = threading.Lock()          # one agent investigation at a time
         self._injected: List[ChangeEntry] = []
+        self._bg: List[threading.Thread] = []      # approval follow-ups and backward runs
         self._inject_lock = threading.Lock()
         self.verifier = BackwardVerifier(snapshot_provider=self._backward_snapshot,
                                          quality_judge=judge_quality_provider)
         configure_backward(self.verifier)
         rt.on_explain.append(self._on_explain)
+
+    def _spawn(self, target: Callable, *args: Any) -> None:
+        t = threading.Thread(target=target, args=args, daemon=True)
+        self._bg = [x for x in self._bg if x.is_alive()] + [t]
+        t.start()
+
+    def join_background(self, timeout: float = 600) -> None:
+        deadline = time.time() + timeout
+        for t in list(self._bg):
+            t.join(max(0.0, deadline - time.time()))
 
     # -- perception + gate ----------------------------------------------------
     def inject(self, entries: List[ChangeEntry]) -> None:
@@ -111,7 +125,26 @@ class Orchestrator:
         with self._inject_lock:
             self._injected.extend(entries)
 
+    def sweep_expired(self) -> None:
+        """An ASK nobody answered within the approval TTL is not executed; close out its case."""
+        ttl = self.rt.approvals.policy.request_ttl_seconds if self.rt.approvals else 600
+        now = time.time()
+        for p in list(self.rt.pending.items.values()):
+            if p.status != "pending" or now - p.created < ttl:
+                continue
+            self.rt.pending.update(p.request_id, status="expired")
+            self.rt.audit.write("approval.expired", request_id=p.request_id, case=p.case_id, command=p.command)
+            self.notifier.mark_expired(p.request_id)
+            case = self.cases.case(p.case_id) if p.case_id else None
+            if case:
+                case.add_timeline(f"approval expired, not executed: {p.command}")
+                self.cases.save(case)
+                self.notifier.action_update(case, p.command, "EXPIRED", "no decision within the approval window")
+                if not [x for x in self.rt.pending.items.values() if x.case_id == case.case_id and x.status == "pending"]:
+                    self.finish(case.case_id)
+
     def cycle(self) -> Optional[str]:
+        self.sweep_expired()
         snap = snap_mod.collect()
         self.store.save(snap)
         learning = self._first_run and self.cycles < self.rt.conf.warmup_cycles
@@ -232,10 +265,9 @@ class Orchestrator:
             self.cases.save(case)
             self.notifier.action_update(case, p.command, "APPROVED" if approved else "DENIED",
                                         f"exit {result.get('returncode')}" if result else "not run")
-            threading.Thread(target=agent.wake, args=(case.case_id, prompts.result_message(
-                request_id, p.command, approved, result)), daemon=True).start()
+            self._spawn(agent.wake, case.case_id, prompts.result_message(request_id, p.command, approved, result))
             if not [x for x in self.rt.pending.items.values() if x.case_id == case.case_id and x.status == "pending"]:
-                threading.Thread(target=self.finish, args=(case.case_id,), daemon=True).start()
+                self._spawn(self.finish, case.case_id)
 
     # -- backward -----------------------------------------------------------------
     def _backward_snapshot(self, case: Any, phase: str) -> Dict[str, Any]:
@@ -247,6 +279,11 @@ class Orchestrator:
             self.cases.save(self.cases.case(case_id), t2=s.ts)
         else:
             ts = m.get("t0") if phase == "T0" else m.get("t1")
+            if phase == "T0" and not ts:
+                # No snapshot predates the case (first run): T1 is the closest reference. Backward then
+                # cannot tell attack residue already present at T1 from the baseline; the report says so.
+                ts = m.get("t1")
+                self.cases.save(self.cases.case(case_id), t0_fallback="T1")
             s = self.store.at_or_after(ts) if ts else None
             if s is None:
                 return {}
@@ -277,6 +314,10 @@ class Orchestrator:
         self.rt.audit.write("backward", case=case_id, verdict=res.verdict.value, score=res.total_score,
                             missed_by_forward=len(res.missed_by_forward))
         self.notifier.backward_report(case, report)
+        if self.cases.meta(case_id).get("t0_fallback"):
+            self.notifier.action_update(case, "backward verification", "NOTE",
+                                        "No snapshot predates this case (first run), so T1 served as the baseline: "
+                                        "the cleanup score is low-confidence.")
 
     # -- main loop -------------------------------------------------------------------
     def run_forever(self, stop: Optional[threading.Event] = None) -> None:

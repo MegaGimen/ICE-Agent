@@ -13,6 +13,7 @@ action ids, then ApprovalStore.decide() enforces approver, expiry, replay, and p
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from typing import Any, Callable, Dict, List, Optional
@@ -33,10 +34,11 @@ from ice.daemon.safety.gate import ApprovalRequest
 
 log = logging.getLogger("ice.slack")
 
-_ASSESS = {"malicious": ":rotating_light: 确认攻击", "uncertain": ":warning: 待确认", "benign": ":white_check_mark: 判定为正常活动",
-           None: ":grey_question: 调查未产出结论"}
-_DECISION = {"AUTO": ":zap: AUTO 自动执行", "ASK": ":raised_hand: ASK 等待人工批准", "DENY": ":no_entry: DENY 已拒绝",
-             "APPROVED": ":white_check_mark: 已批准并执行", "DENIED": ":x: 人工拒绝"}
+_ASSESS = {"malicious": ":rotating_light: Attack confirmed", "uncertain": ":warning: Needs review",
+           "benign": ":white_check_mark: Benign activity", None: ":grey_question: No conclusion"}
+_DECISION = {"AUTO": ":zap: AUTO: executed", "ASK": ":raised_hand: ASK: waiting for human approval",
+             "DENY": ":no_entry: DENY: refused by the safety gate", "APPROVED": ":white_check_mark: Approved and executed",
+             "DENIED": ":x: Denied by a human", "EXPIRED": ":hourglass: Approval expired: not executed"}
 
 
 def _esc(s: str) -> str:
@@ -54,7 +56,9 @@ class SlackNotifier(Notifier):
         self.ice = WebClient(token=secret("slack-bot-token", "SLACK_BOT_TOKEN"))
         self.gate = WebClient(token=secret("slack-icegate-bot-token", "ICE_GATE_BOT_TOKEN"))
         self.channel = conf.slack_alert_channel
-        self._threads: Dict[str, str] = {}      # case_id -> thread ts
+        self._threads_path = conf.state_dir / "slack_threads.json"
+        self._threads: Dict[str, str] = (      # case_id -> thread ts, persisted across restarts
+            json.loads(self._threads_path.read_text()) if self._threads_path.exists() else {})
         self._cards: Dict[str, str] = {}        # request_id -> card ts
 
     # -- helpers ------------------------------------------------------------------
@@ -65,8 +69,23 @@ class SlackNotifier(Notifier):
             log.exception("Slack post failed")
             return None
 
+    def _remember(self, case_id: str, ts: str) -> None:
+        self._threads[case_id] = ts
+        tmp = self._threads_path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._threads))
+        tmp.replace(self._threads_path)
+
     def _thread(self, case_id: str) -> Optional[str]:
-        return self._threads.get(case_id)
+        if case_id in self._threads:
+            return self._threads[case_id]
+        try:   # alert posted by an earlier daemon process: find it in recent channel history
+            for m in self.ice.conversations_history(channel=self.channel, limit=200)["messages"]:
+                if (m.get("text") or "").startswith(f"ICE {case_id}:"):
+                    self._remember(case_id, m["ts"])
+                    return m["ts"]
+        except Exception:  # noqa: BLE001
+            log.exception("thread lookup failed")
+        return None
 
     # -- Notifier -----------------------------------------------------------------
     def case_alert(self, case: Case, assessment: Optional[str], results: List[GateResult]) -> None:
@@ -74,23 +93,23 @@ class SlackNotifier(Notifier):
             f"• `{_clip(r.entry.table, 20)}` {_esc(_clip(r.entry.value, 140))}  — {', '.join(r.reasons[:4])}"
             for r in results[:8])
         actions = "\n".join(f"{i + 1}. `{_esc(_clip(a.command, 200))}` — {_esc(_clip(a.intent, 160))}"
-                            for i, a in enumerate(case.proposed_actions)) or "_无_"
+                            for i, a in enumerate(case.proposed_actions)) or "_none_"
         blocks = [
             {"type": "header", "text": {"type": "plain_text", "text": _clip(f"ICE {case.case_id} · {_ASSESS.get(assessment, assessment)}", 150), "emoji": True}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": _clip(_esc(case.reason) or "_（无攻击故事）_", 2900)}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": _clip(_esc(case.reason) or "_(no attack story)_", 2900)}},
             {"type": "section", "fields": [
                 {"type": "mrkdwn", "text": f"*ATT&CK*\n{', '.join(case.attck) or '—'}"},
-                {"type": "mrkdwn", "text": f"*置信度*\n{case.confidence:.0%}"},
-                {"type": "mrkdwn", "text": f"*主机*\n{', '.join(case.hosts)}"},
+                {"type": "mrkdwn", "text": f"*Confidence*\n{case.confidence:.0%}"},
+                {"type": "mrkdwn", "text": f"*Hosts*\n{', '.join(case.hosts)}"},
                 {"type": "mrkdwn", "text": f"*IOC*\n{_esc(_clip(', '.join(case.ioc[:6]), 300)) or '—'}"},
             ]},
-            {"type": "section", "text": {"type": "mrkdwn", "text": _clip(f"*检测信号（检测门控）*\n{signals}", 2900)}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": _clip(f"*建议处置（逐条过安全闸）*\n{actions}", 2900)}},
-            {"type": "context", "elements": [{"type": "mrkdwn", "text": "本地推理 · 数据不离开本机 · 处置动作由沙箱外安全闸独立审查"}]},
+            {"type": "section", "text": {"type": "mrkdwn", "text": _clip(f"*Signals (detection gate)*\n{signals}", 2900)}},
+            {"type": "section", "text": {"type": "mrkdwn", "text": _clip(f"*Proposed actions (each reviewed by the safety gate)*\n{actions}", 2900)}},
+            {"type": "context", "elements": [{"type": "mrkdwn", "text": "Local inference only · host data never leaves this machine · actions reviewed by an out-of-sandbox safety gate"}]},
         ]
         ts = self._post(self.ice, text=f"ICE {case.case_id}: {assessment}", blocks=blocks)
         if ts:
-            self._threads[case.case_id] = ts
+            self._remember(case.case_id, ts)
 
     def action_update(self, case: Case, command: str, decision: str, detail: str) -> None:
         self._post(self.ice, thread_ts=self._thread(case.case_id),
@@ -120,9 +139,20 @@ class SlackNotifier(Notifier):
         try:
             self.gate.chat_update(channel=self.channel, ts=ts, text=f"ICE Gate {request_id} decided",
                                   blocks=[{"type": "section", "text": {"type": "mrkdwn", "text":
-                                           f"{'✅ 已批准' if approved else '❌ 已拒绝'} by <@{user_id}> · request `{request_id}`"}}])
+                                           f"{'✅ Approved' if approved else '❌ Denied'} by <@{user_id}> · request `{request_id}`"}}])
         except Exception:  # noqa: BLE001
             log.exception("card update failed")
+
+
+    def mark_expired(self, request_id: str) -> None:
+        ts = self._cards.get(request_id)
+        if ts:
+            try:
+                self.gate.chat_update(channel=self.channel, ts=ts, text=f"ICE Gate {request_id} expired",
+                                      blocks=[{"type": "section", "text": {"type": "mrkdwn", "text":
+                                               f":hourglass: Expired without a decision; not executed · request `{request_id}`"}}])
+            except Exception:  # noqa: BLE001
+                log.exception("card update failed")
 
 
 class IceGateListener:
@@ -177,7 +207,7 @@ class IceGateListener:
         except (PermissionError, ValueError) as e:
             self.rt.audit.write("icegate.refused", request_id=request_id, user=user_id, reason=str(e))
             p = self.rt.pending.get(request_id)
-            self.notifier._post(self.notifier.gate, text=f":no_entry: ICE Gate 拒绝了 <@{user_id}> 对 `{request_id}` 的操作：{e}",
+            self.notifier._post(self.notifier.gate, text=f":no_entry: ICE Gate refused the action by <@{user_id}> on `{request_id}`: {e}",
                                 thread_ts=self.notifier._thread(p.case_id) if p and p.case_id else None)
             return
         self.notifier.mark_decided(request_id, decision.approved, user_id)

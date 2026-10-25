@@ -10,7 +10,7 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-LANG = os.environ.get("ICE_LANG", "zh")
+LANG = os.environ.get("ICE_LANG", "en")   # Slack-facing text (reason, intents, explanations)
 _LANG_NAME = {"zh": "Simplified Chinese", "en": "English"}.get(LANG, "English")
 
 ROLE = """You are ICE, a local AI security on-call analyst for this host. All inference is local; host data never leaves the machine.

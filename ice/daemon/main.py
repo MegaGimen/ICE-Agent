@@ -94,6 +94,8 @@ def main() -> None:
                     stop.wait(2.0)
             except KeyboardInterrupt:
                 pass
+            orch.sweep_expired()   # close out cases whose ASKs ran out unanswered
+        orch.join_background(timeout=600)   # let approval follow-ups and backward finish before exiting
         return
     try:
         orch.run_forever(stop)
