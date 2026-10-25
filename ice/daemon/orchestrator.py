@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from ice.daemon import kb
 from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
 from ice.daemon.contracts import Case, CaseStatus, ChangeEntry, GateDecision, new_id
 from ice.daemon.detect.gate import GateResult, evaluate_many
@@ -224,8 +225,14 @@ class Orchestrator:
                 log.exception("graph lookup failed")
         experience = [f"- {p['kind']} {p['object']} appeared in {p['case_id']} ({p['assessment']}, {p['created']}): "
                       f"{(p.get('summary') or '')[:200]}" for p in prior[:10]]
-        msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated], experience=experience or None,
-                                   graph_available=graph is not None)
+        # Retrieval before investigating (plan §3.2): technique notes + lessons from the error book.
+        query = " ".join(f"{r.entry.value} {' '.join(str(v)[:200] for v in r.entry.untrusted.values())}"
+                         for r in escalated[:5])
+        knowledge = kb.technique_notes(query)
+        experience += kb.experience_notes(query)
+        msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated], knowledge=knowledge or None,
+                                   experience=experience or None, graph_available=graph is not None)
+        meta["knowledge"] = [n.split(" ", 2)[1] for n in knowledge]
         self.rt.audit.write("case.open", case=case_id, escalations=len(escalated))
         reply = agent.wake(case_id, msg)
         case, assessment = build_case(case_id, host, reply.text, [r.entry.to_dict() for r in escalated])
