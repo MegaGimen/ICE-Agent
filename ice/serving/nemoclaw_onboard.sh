@@ -40,6 +40,11 @@ export NEMOCLAW_SANDBOX_NAME="$SANDBOX" NEMOCLAW_POLICY_MODE=suggested
 export NEMOCLAW_CONTEXT_WINDOW="${NEMOCLAW_CONTEXT_WINDOW:-65536}" NEMOCLAW_MAX_TOKENS="${NEMOCLAW_MAX_TOKENS:-8192}"
 "$NC" onboard --non-interactive
 
+# Disable OpenClaw's built-in heartbeat (plan: ICE's own daemon drives everything; the heartbeat only
+# DMs the operator and spends inference). every=0m stops the recurring self-poll, target=none silences it.
+HB="$HOME/.nemoclaw/sandboxes" # noqa
+"$NC" "$SANDBOX" exec -- python3 -c "import json;p='/sandbox/.openclaw/openclaw.json';c=json.load(open(p));c.setdefault('agents',{}).setdefault('defaults',{})['heartbeat']={'every':'0m','target':'none'};json.dump(c,open(p,'w'),indent=1);print('heartbeat disabled')" || true
+
 # 重建沙箱会丢掉 MCP 注册：主机侧 MCP（deploy/run_mcp_link.sh）在跑时自动重新注册（plan §9 step 5）。
 TOKEN_FILE="$HERE/../../deploy/local-secrets/mcp.token"
 MCP_IP="${ICE_MCP_PRIVATE_IP:-172.18.0.1}"
