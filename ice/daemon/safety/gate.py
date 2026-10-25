@@ -71,6 +71,19 @@ class SafetyGate:
     _times: deque[float] = field(default_factory=deque, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
+    def current_policy_allows(self, command: str, target: str) -> bool:
+        """Recheck hard stops before dispatching an approved stored action."""
+        if self.policy.kill_switch or not _matches(target, self.policy.authorized_targets):
+            return False
+        if self.policy.deny_critical_assets:
+            try:
+                parts = shlex.split(command)
+            except ValueError:
+                return False
+            if any(_matches(item, self.policy.critical_assets) for item in (target, *parts[1:])):
+                return False
+        return True
+
     def safety_gate(self, command: str | Mapping[str, object] | ProposedAction, intent: str | Mapping[str, object]) -> SafetyVerdict:
         """Review the supplied command and explicit target, returning a verdict.
 
@@ -95,15 +108,20 @@ class SafetyGate:
                 return _verdict("DENY", "Rate limit exceeded", scope=1)
             self._times.append(now)
 
-        critical = _matches(target, self.policy.critical_assets)
-        if critical and self.policy.deny_critical_assets:
-            return _verdict("DENY", "Critical asset is denied by policy", scope=1)
         try:
             parts = shlex.split(raw)
         except ValueError:
             return _verdict("DENY", "Command syntax could not be parsed", scope=1)
         if not parts:
             return _verdict("DENY", "Command is empty", scope=1)
+        # Inspect both the declared target and literal command arguments. A
+        # model can understate the target in ProposedAction.targets.
+        critical = any(
+            _matches(candidate, self.policy.critical_assets)
+            for candidate in (target, *parts[1:])
+        )
+        if critical and self.policy.deny_critical_assets:
+            return _verdict("DENY", "Critical asset is denied by policy", scope=1)
         program = parts[0].rsplit("/", 1)[-1]
         irreversible = program in _IRREVERSIBLE
         shell_syntax = bool(_SHELL_SYNTAX.search(raw))
@@ -163,7 +181,10 @@ def safety_gate(
     gate: SafetyGate | None = None,
 ) -> SafetyVerdict:
     """Shared entry point. An unconfigured gate fails closed."""
-    return (gate or _configured or SafetyGate(SafetyPolicy())).safety_gate(command, intent)
+    verdict = (gate or _configured or SafetyGate(SafetyPolicy())).safety_gate(command, intent)
+    if isinstance(command, ProposedAction):
+        verdict.action_id = command.action_id
+    return verdict
 
 
 def _extract_command_and_target(command: str | Mapping[str, object] | ProposedAction) -> tuple[str, str]:
@@ -184,7 +205,10 @@ def _extract_command_and_target(command: str | Mapping[str, object] | ProposedAc
 
 
 def _matches(target: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatchcase(target, pattern) for pattern in patterns)
+    return any(
+        fnmatchcase(target, pattern) or (pattern.startswith("/") and target.startswith(pattern.rstrip("/") + "/"))
+        for pattern in patterns
+    )
 
 
 def _assess(

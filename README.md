@@ -8,13 +8,16 @@ of ICE. See the local (uncommitted) `colab.md` and `plan.md` for architecture.
   owns human authentication and execution.
 - `ice/daemon/backward/`: full T0/T1/T2 comparison, deterministic probes,
   optional judge adapter, and a redacted report payload.
-- `ice/daemon/evolve/`: local SQLite error book and candidate retest gate.
+- `ice/daemon/evolve/`: local SQLite error book, candidate retest gate, and
+  regression demotion.
 - `deploy/`: local CA creation, reverse proxy template, and human setup order.
+- `targets/`: synthetic scenario outlines and snapshot/retest inputs.
 
 The intake-side `contracts.py` and `judge()` are checked in and used by these
-modules. The orchestrator, MCP server, host snapshot source, and external ICE
-Gate callback are still pending. Configure the safety scorer, policy, approval
-queue, and backward adapters at daemon startup. Without those dependencies the
+modules. The orchestrator, MCP server, host snapshot source, and live ICE Gate
+service are still pending. The host-only approval store and signed Slack
+interaction handler are available for that service. Configure the safety
+scorer, policy, approval store, and backward adapters at daemon startup. Without those dependencies the
 safety gate fails closed, and backward verification raises an error rather
 than claiming a result. The current `host_exec(command: str, intent: str)`
 contract has no bound target, so it cannot pass the gate's scope check until
