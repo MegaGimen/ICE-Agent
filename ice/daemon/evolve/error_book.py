@@ -165,16 +165,27 @@ class ErrorBook:
         return outcomes
 
     def record_backward_misses(self, result: object) -> list[int]:
-        """Capture residuals the forward case may have omitted."""
+        """Capture one miss per snapshot object, retaining every field's evidence."""
         contracted = getattr(result, "result", result)
         case_id = str(getattr(contracted, "case_id"))
-        recorded: list[int] = []
+        grouped: dict[str, list[dict[str, Any]]] = {}
         for item in getattr(contracted, "missed_by_forward"):
-            signal = str(item.get("path") or item.get("indicator") or "unknown")
+            path = str(item.get("path") or item.get("indicator") or "unknown")
+            # Stable osquery rows are flat: stable.<table>.<natural_key>.<field>.
+            # The natural key may itself contain dots, so remove only the final
+            # field segment. Flow entries are already key-presence objects.
+            signal = path.rsplit(".", 1)[0] if path.startswith("stable.") and "." in path else path
+            grouped.setdefault(signal, []).append(dict(item))
+        recorded: list[int] = []
+        for signal, findings in grouped.items():
             if self.connection.execute(
                 "SELECT 1 FROM misses WHERE case_id = ? AND signal = ? LIMIT 1",
                 (case_id, signal),
             ).fetchone():
                 continue
-            recorded.append(self.record_miss(case_id, signal, item))
+            recorded.append(self.record_miss(case_id, signal, {
+                "object_path": signal,
+                "finding_count": len(findings),
+                "findings": findings,
+            }))
         return recorded
