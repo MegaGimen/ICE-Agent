@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ice.daemon import kb
+from ice.daemon import kb, remediate
 from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
 from ice.daemon.contracts import Case, CaseStatus, ChangeEntry, GateDecision, new_id
 from ice.daemon.detect.gate import GateResult, evaluate_many
@@ -323,6 +323,17 @@ class Orchestrator:
                 case.add_timeline("revision failed; actions with shell syntax dropped")
             if not case.proposed_actions and case.status is CaseStatus.PROPOSED:
                 case.status = CaseStatus.INVESTIGATING
+        # Deterministic containment (remediate.py): for a malicious/uncertain case, remove whatever the
+        # gate flagged malicious, built from the change-entry itself — not from the LLM, which has
+        # proposed nothing even when it agreed the event was an attack. These still pass the safety gate.
+        if assessment in ("malicious", "uncertain"):
+            existing = {a.command for a in case.proposed_actions}
+            added = [a for a in remediate.propose_containment(escalated) if a.command not in existing]
+            if added:
+                case.proposed_actions.extend(added)
+                case.status = CaseStatus.PROPOSED
+                case.add_timeline("deterministic containment proposed for gate-flagged artifacts: "
+                                  + ", ".join(a.command for a in added))
         related: List[Dict[str, Any]] = []
         if graph is not None:
             try:
