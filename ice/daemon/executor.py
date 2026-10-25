@@ -28,6 +28,11 @@ class ExecResult:
         return asdict(self)
 
 
+def dry(command: str) -> ExecResult:
+    """Result recorded instead of running, in dry-run mode."""
+    return ExecResult(command, 0, "", "dry run: not executed", 0.0)
+
+
 def run(command: str, timeout: float = 60.0) -> ExecResult:
     argv = shlex.split(command)
     t = time.time()

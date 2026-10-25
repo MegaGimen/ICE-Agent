@@ -59,8 +59,12 @@ class SafetyPolicy:
 
 
 _SHELL_SYNTAX = re.compile(r"[;&|<>`$\\\n\r]")
+# Deterministic backstop (plan §3.4 #1): effects that cannot be undone are always ASK, whatever Kev
+# scores. Everything else (iptables/nft rules, kill, systemctl, chmod, ...) is left to Kev's
+# reversible / needs_human scores: forcing ASK on routine actions trains humans to approve blindly.
 _IRREVERSIBLE = frozenset(
-    {"chmod", "chown", "dd", "fdisk", "iptables", "kill", "mkfs", "mount", "nft", "reboot", "rm", "shutdown", "systemctl", "ufw", "umount"}
+    {"dd", "fdisk", "halt", "mkfs", "mkswap", "parted", "poweroff", "reboot", "rm", "shred", "shutdown",
+     "truncate", "userdel", "wipefs"}
 )
 
 
@@ -130,7 +134,7 @@ class SafetyGate:
         if critical and self.policy.deny_critical_assets:
             return _verdict("DENY", "Critical asset is denied by policy", scope=1)
         program = parts[0].rsplit("/", 1)[-1]
-        irreversible = program in _IRREVERSIBLE
+        irreversible = program in _IRREVERSIBLE or program.startswith("mkfs.")
         shell_syntax = bool(_SHELL_SYNTAX.search(raw))
         # Arguments can change a command's behavior (for example, find -exec),
         # and an absolute path can name an attacker-controlled executable.
@@ -148,11 +152,14 @@ class SafetyGate:
                 return _verdict("DENY", "Action lacks a legitimate basis", **_score_kwargs(scores))
             if scores["scope_match"] < 0.50:
                 return _verdict("DENY", "Proposed effects exceed the stated scope", **_score_kwargs(scores))
+        # plan §3.3: legitimate (checked above) and low cost -> AUTO. Kev's scores decide; the hard stops
+        # are critical assets, irreversible programs, and shell syntax (which never runs as written).
         if (
-            read_only and not critical and scores is not None
+            not critical and not irreversible and not shell_syntax and scores is not None
             and scores["needs_human"] < 0.70 and scores["reversible"] >= 0.70
         ):
-            return _verdict("AUTO", "Authorized low-impact command", **_score_kwargs(scores))
+            return _verdict("AUTO", "Legitimate low-cost action (Kev scores)" if not read_only
+                            else "Authorized low-impact command", **_score_kwargs(scores))
 
         reason = (
             "Critical asset requires approval" if critical else

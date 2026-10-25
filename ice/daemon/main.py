@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import threading
 
@@ -76,9 +77,12 @@ def main() -> None:
         if missing:
             raise SystemExit(f"unknown fixtures: {sorted(missing)}")
         warm = max(2, rt.conf.warmup_cycles)
+        # Synthetic events must never drive real changes: replay runs dry unless explicitly overridden.
+        rt.dry_run = os.environ.get("ICE_REPLAY_LIVE") != "1"
         orch.inject(entries, min_cycle=warm)
         rt.audit.write("replay", fixtures=wanted)
-        log.info("replaying %d synthetic entries after %d real cycles: %s", len(entries), warm, wanted)
+        log.info("replaying %d synthetic entries after %d real cycles (%s): %s", len(entries), warm,
+                 "DRY RUN, nothing executed" if rt.dry_run else "LIVE", wanted)
 
     if a.once:
         import time

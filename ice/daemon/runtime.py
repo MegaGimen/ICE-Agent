@@ -107,6 +107,9 @@ class Runtime:
             self.graph = Graph(sd / "graph" / "kuzu", source=self.conf.hostname)
         except Exception:  # noqa: BLE001
             log.exception("correlation graph unavailable")
+        # Dry run: gate verdicts and approvals happen as usual, but no command is executed. Set for --replay,
+        # so synthetic events never drive real changes on the host.
+        self.dry_run = os.environ.get("ICE_DRY_RUN") == "1"
         # Case whose agent run is in progress; host_exec ASKs are attributed to it.
         self._case_lock = threading.Lock()
         self.current_case: Optional[str] = None

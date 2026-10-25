@@ -292,7 +292,9 @@ class Orchestrator:
                 self.notifier.action_update(case, action.command, "ASK", "waiting for human approval in ICE Gate")
             elif decision == "AUTO":
                 res = ((r.content or {}).get("result") or {}).get("data") or {}
-                self.notifier.action_update(case, action.command, "AUTO", f"exit {res.get('returncode')}")
+                self.notifier.action_update(case, action.command, "AUTO",
+                                            "dry run (replay): not executed" if self.rt.dry_run
+                                            else f"exit {res.get('returncode')}")
             else:
                 self.notifier.action_update(case, action.command, "DENY", r.error or "denied")
         self.cases.save(case, actions=outcomes)
@@ -315,10 +317,10 @@ class Orchestrator:
                 self.rt.pending.update(request_id, status="blocked")
                 self.rt.audit.write("host_exec.blocked_after_approval", case=p.case_id, command=p.command)
                 return
-            res = executor.run(p.command)
+            res = executor.dry(p.command) if self.rt.dry_run else executor.run(p.command)
             result = res.to_dict()
             self.rt.audit.write("host_exec.executed", case=p.case_id, command=p.command, result=result,
-                                by=f"approval:{user_id}", request_id=request_id)
+                                by=f"approval:{user_id}", request_id=request_id, dry_run=self.rt.dry_run)
         self.rt.pending.update(request_id, status="executed" if approved else "denied", result=result)
         self.rt.audit.write("approval", request_id=request_id, approved=approved, user=user_id, case=p.case_id)
         case = self.cases.case(p.case_id) if p.case_id else None
@@ -326,7 +328,8 @@ class Orchestrator:
             case.add_timeline(f"human {'approved' if approved else 'denied'}: {p.command}")
             self.cases.save(case)
             self.notifier.action_update(case, p.command, "APPROVED" if approved else "DENIED",
-                                        f"exit {result.get('returncode')}" if result else "not run")
+                                        ("dry run (replay): not executed" if self.rt.dry_run else
+                                         f"exit {result.get('returncode')}") if result else "not run")
             self._spawn(agent.wake, case.case_id, prompts.result_message(request_id, p.command, approved, result))
             if not [x for x in self.rt.pending.items.values() if x.case_id == case.case_id and x.status == "pending"]:
                 self._spawn(self.finish, case.case_id)

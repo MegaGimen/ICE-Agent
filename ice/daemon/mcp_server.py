@@ -143,8 +143,9 @@ class IceTools:
         v = verdict.to_dict()
         self.rt.audit.write("host_exec.verdict", case=case, command=command, intent=intent, verdict=v)
         if verdict.decision is GateDecision.AUTO:
-            res = executor.run(command)
-            self.rt.audit.write("host_exec.executed", case=case, command=command, result=res.to_dict(), by="AUTO")
+            res = executor.dry(command) if self.rt.dry_run else executor.run(command)
+            self.rt.audit.write("host_exec.executed", case=case, command=command, result=res.to_dict(), by="AUTO",
+                                dry_run=self.rt.dry_run)
             return ToolResult(True, TOOL_HOST_EXEC, content={"decision": "AUTO", "scores": v["scores"],
                                                               "result": _wrap(res.to_dict())})
         if verdict.decision is GateDecision.ASK:
