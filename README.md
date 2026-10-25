@@ -19,9 +19,9 @@ service are still pending. The host-only approval store and signed Slack
 interaction handler are available for that service. Configure the safety
 scorer, policy, approval store, and backward adapters at daemon startup. Without those dependencies the
 safety gate fails closed, and backward verification raises an error rather
-than claiming a result. The current `host_exec(command: str, intent: str)`
-contract has no bound target, so it cannot pass the gate's scope check until
-the intake side supplies the actual target with the action.
+than claiming a result. For the frozen `host_exec(command: str, intent: str)`
+signature, the host daemon sets `SafetyPolicy.bound_target` to the actual
+executor host. The gate never takes that binding from agent-written intent.
 
 No component in this branch executes a host command, starts a service, sends a
 Slack message, or calls a remote model. Runtime SQLite files, certificates,

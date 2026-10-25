@@ -43,6 +43,9 @@ class ApprovalQueue(Protocol):
 @dataclass(frozen=True)
 class SafetyPolicy:
     authorized_targets: tuple[str, ...] = ()
+    # Set only by the host daemon for host_exec(command, intent). Never derive
+    # it from the agent's intent. It names the actual executor's host.
+    bound_target: str | None = None
     critical_assets: tuple[str, ...] = ()
     deny_critical_assets: bool = False
     kill_switch: bool = False
@@ -90,7 +93,7 @@ class SafetyGate:
         Intent is untrusted explanatory text. It cannot approve or override a
         command. No command can be AUTO without an explicitly authorized target.
         """
-        raw, target = _extract_command_and_target(command)
+        raw, target = _extract_command_and_target(command, self.policy.bound_target)
         explanation = intent if isinstance(intent, str) else str(intent.get("reason", ""))
         if self.policy.kill_switch:
             return _verdict("DENY", "Kill switch is active", scope=0)
@@ -187,7 +190,10 @@ def safety_gate(
     return verdict
 
 
-def _extract_command_and_target(command: str | Mapping[str, object] | ProposedAction) -> tuple[str, str]:
+def _extract_command_and_target(
+    command: str | Mapping[str, object] | ProposedAction,
+    bound_target: str | None,
+) -> tuple[str, str]:
     if isinstance(command, ProposedAction):
         if len(command.targets) != 1:
             return "", ""
@@ -195,9 +201,11 @@ def _extract_command_and_target(command: str | Mapping[str, object] | ProposedAc
     if isinstance(command, Mapping):
         raw = command.get("command", "")
         target = command.get("target", "")
+    elif isinstance(command, str):
+        # host_exec's frozen signature carries no target argument. The host
+        # daemon supplies its own execution host as a trusted policy binding.
+        raw, target = command, bound_target or ""
     else:
-        # A target taken from intent would be an untrusted description rather
-        # than the target bound to the actual proposed execution.
         return "", ""
     if not isinstance(raw, str) or not isinstance(target, str):
         return "", ""

@@ -39,7 +39,9 @@ before applying the reverse proxy template.
    Agent messages never count as approval.
 
    At daemon startup, construct a `SafetyGate` with the host's current
-   `SafetyPolicy` and `judge_score_provider`. Construct an `ApprovalStore` in a
+   `SafetyPolicy` and `judge_score_provider`. Set `SafetyPolicy.bound_target`
+   to the actual host that executes `host_exec` commands; do not take it from
+   the agent's intent. Construct an `ApprovalStore` in a
    host-only directory (for example `/var/lib/ice/approvals.sqlite3`) with an
    `ApprovalPolicy` containing the exact Slack team/channel/approver IDs and
    `approval_guard=gate.current_policy_allows`. Set `gate.approval_queue` to
