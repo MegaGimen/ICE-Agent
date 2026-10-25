@@ -171,5 +171,10 @@ class ErrorBook:
         recorded: list[int] = []
         for item in getattr(contracted, "missed_by_forward"):
             signal = str(item.get("path") or item.get("indicator") or "unknown")
+            if self.connection.execute(
+                "SELECT 1 FROM misses WHERE case_id = ? AND signal = ? LIMIT 1",
+                (case_id, signal),
+            ).fetchone():
+                continue
             recorded.append(self.record_miss(case_id, signal, item))
         return recorded

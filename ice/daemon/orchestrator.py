@@ -22,6 +22,7 @@ from ice.daemon import kb
 from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
 from ice.daemon.contracts import Case, CaseStatus, ChangeEntry, GateDecision, new_id
 from ice.daemon.detect.gate import GateResult, evaluate_many
+from ice.daemon.evolve.error_book import ErrorBook
 from ice.daemon.investigate import agent, prompts
 from ice.daemon.investigate.case import build_case, extract_json
 from ice.daemon.mcp_server import IceTools
@@ -426,6 +427,17 @@ class Orchestrator:
         self.cases.save(case, backward=res.to_dict(), backward_outcome=report.outcome)
         self.rt.audit.write("backward", case=case_id, verdict=res.verdict.value, score=res.total_score,
                             missed_by_forward=len(res.missed_by_forward))
+        try:
+            book = ErrorBook(self.rt.conf.state_dir / "errorbook.sqlite3")
+            try:
+                recorded = book.record_backward_misses(res)
+            finally:
+                book.close()
+            if recorded:
+                self.rt.audit.write("evolve.misses_recorded", case=case_id, count=len(recorded))
+        except Exception as e:  # noqa: BLE001 — reporting must continue if the local error book fails
+            log.exception("error book write failed for %s", case_id)
+            self.rt.audit.write("evolve.error", case=case_id, error=str(e))
         self.notifier.backward_report(case, report)
         if self.cases.meta(case_id).get("t0_fallback"):
             self.notifier.action_update(case, "backward verification", "NOTE",
