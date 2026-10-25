@@ -7,7 +7,7 @@ of ICE. See the local (uncommitted) `colab.md` and `plan.md` for architecture.
   approval requests, and Slack-ready approval cards. The external ICE Gate
   owns human authentication and execution.
 - `ice/daemon/backward/`: full T0/T1/T2 comparison, deterministic probes,
-  optional judge adapter, and a redacted report payload.
+  optional judge adapter, and a redacted Slack report card.
 - `ice/daemon/evolve/`: local SQLite error book, candidate retest gate, and
   regression demotion.
 - `deploy/`: local CA creation, reverse proxy template, and human setup order.
