@@ -21,7 +21,16 @@ if [ -f "$ENV_FILE" ]; then
   SLACK_BOT_TOKEN="$(sed -nE 's/^slack-bot-token=(.*)$/\1/p' "$ENV_FILE")"
   SLACK_APP_TOKEN="$(sed -nE 's/^slack-app-token=(.*)$/\1/p' "$ENV_FILE")"
   export SLACK_BOT_TOKEN SLACK_APP_TOKEN
+  # Slack 访问白名单（成员 ID / 频道 ID，逗号分隔；不是密钥）。不设 = DM 走 pairing、频道全部忽略。
+  SLACK_ALLOWED_USERS="${SLACK_ALLOWED_USERS:-$(sed -nE 's/^slack-allowed-users=(.*)$/\1/p' "$ENV_FILE")}"
+  SLACK_ALLOWED_CHANNELS="${SLACK_ALLOWED_CHANNELS:-$(sed -nE 's/^slack-allowed-channels=(.*)$/\1/p' "$ENV_FILE")}"
+  if [ -n "$SLACK_ALLOWED_USERS" ]; then export SLACK_ALLOWED_USERS; fi
+  if [ -n "$SLACK_ALLOWED_CHANNELS" ]; then export SLACK_ALLOWED_CHANNELS; fi
 fi
+
+# MCP 私有 CA（plan §9 step 2）：沙箱要信任 deploy/create-local-ca.sh 生成的 CA，必须在 onboard 时给。
+CA="$HERE/../../deploy/local-secrets/ca.crt"
+if [ -f "$CA" ]; then export NEMOCLAW_CORPORATE_CA_BUNDLE="$(readlink -f "$CA")"; fi
 
 # OpenClaw 自带 system prompt + 工具定义约 22k tokens；context 必须 >8192（vLLM 也要 --max-model-len ≥ 此值）。
 # MAX_TOKENS 给足：Qwen 先思考再调工具。

@@ -2,22 +2,28 @@
 set -euo pipefail
 
 # Run on the host, before NemoClaw onboarding. Never copy local-secrets to Git.
-if [[ $# -ne 1 ]]; then
-  echo "Usage: $0 <private MCP IP address>" >&2
+# The first IP is the certificate CN; every IP goes into the SAN list. The sandbox
+# reaches the host via the openshell-docker bridge (172.18.0.1 here), so list it first.
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <private MCP IP address> [more IPs...]" >&2
   exit 2
 fi
-ip="$1"
-if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-  echo "Expected an IPv4 address" >&2
-  exit 2
-fi
-IFS=. read -r a b c d <<< "$ip"
-for octet in "$a" "$b" "$c" "$d"; do
-  if (( 10#$octet > 255 )); then
-    echo "Invalid IPv4 address" >&2
+for ip in "$@"; do
+  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "Expected an IPv4 address: $ip" >&2
     exit 2
   fi
+  IFS=. read -r a b c d <<< "$ip"
+  for octet in "$a" "$b" "$c" "$d"; do
+    if (( 10#$octet > 255 )); then
+      echo "Invalid IPv4 address: $ip" >&2
+      exit 2
+    fi
+  done
 done
+ip="$1"
+san="$(printf 'IP:%s,' "$@")"
+san="${san%,}"
 
 umask 077
 directory="$(cd "$(dirname "$0")" && pwd)/local-secrets"
@@ -33,7 +39,7 @@ cat > "$extension_file" <<EOF
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
-subjectAltName=IP:$ip
+subjectAltName=$san
 EOF
 
 openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$directory/ca.key"
@@ -50,7 +56,9 @@ openssl x509 -req -sha256 -days 30 -in "$directory/mcp.csr" \
   -extfile "$extension_file" -out "$directory/mcp.crt"
 rm -f "$directory/mcp.csr"
 openssl verify -CAfile "$directory/ca.crt" "$directory/mcp.crt"
-openssl x509 -in "$directory/mcp.crt" -noout -checkip "$ip"
+for ip in "$@"; do
+  openssl x509 -in "$directory/mcp.crt" -noout -checkip "$ip"
+done
 echo "CA certificate: $directory/ca.crt"
 echo "Server certificate: $directory/mcp.crt"
 echo "Keep ca.key and mcp.key on the host; do not copy them into the sandbox."

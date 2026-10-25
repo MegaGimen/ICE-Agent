@@ -1,0 +1,52 @@
+{
+  "display_information": {
+    "name": "ICE",
+    "description": "ICE local AI security on-call (OpenClaw on local models)"
+  },
+  "features": {
+    "bot_user": { "display_name": "ice_openclaw", "always_online": true },
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "slash_commands": [
+      { "command": "/openclaw", "description": "Send a message to ICE", "should_escape": false }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "assistant:write",
+        "channels:history",
+        "channels:read",
+        "chat:write",
+        "commands",
+        "groups:history",
+        "groups:read",
+        "im:history",
+        "im:read",
+        "im:write",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "event_subscriptions": {
+      "bot_events": [
+        "app_home_opened",
+        "app_mention",
+        "app_context_changed",
+        "agent_session_stopped",
+        "agent_session_title_changed",
+        "message.channels",
+        "message.groups",
+        "message.im"
+      ]
+    },
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

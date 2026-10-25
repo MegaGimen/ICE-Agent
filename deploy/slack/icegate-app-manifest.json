@@ -1,0 +1,25 @@
+{
+  "display_information": {
+    "name": "ICE Gate",
+    "description": "Out-of-sandbox approval buttons for ICE host_exec actions"
+  },
+  "features": {
+    "bot_user": { "display_name": "ice_gate", "always_online": true }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "channels:read",
+        "groups:read",
+        "users:read"
+      ]
+    }
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "interactivity": { "is_enabled": true },
+    "org_deploy_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

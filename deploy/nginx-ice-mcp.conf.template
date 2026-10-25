@@ -14,5 +14,7 @@ server {
         proxy_set_header Authorization $http_authorization;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 120s;
+        proxy_buffering off;
+        proxy_cache off;
     }
 }
