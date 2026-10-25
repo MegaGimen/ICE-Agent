@@ -78,6 +78,8 @@ class SafetyGate:
         """Recheck hard stops before dispatching an approved stored action."""
         if self.policy.kill_switch or not _matches(target, self.policy.authorized_targets):
             return False
+        if self.policy.bound_target and not _matches(self.policy.bound_target, self.policy.authorized_targets):
+            return False
         if self.policy.deny_critical_assets:
             try:
                 parts = shlex.split(command)
@@ -101,6 +103,8 @@ class SafetyGate:
             return _verdict("DENY", "Command and target are required", scope=0)
         if not _matches(target, self.policy.authorized_targets):
             return _verdict("DENY", "Target is outside the authorized scope", scope=0)
+        if self.policy.bound_target and not _matches(self.policy.bound_target, self.policy.authorized_targets):
+            return _verdict("DENY", "Execution host is outside the authorized scope", scope=0)
         if self.policy.max_requests_per_window <= 0 or self.policy.window_seconds <= 0:
             return _verdict("DENY", "Rate limit policy is invalid", scope=1)
         with self._lock:
