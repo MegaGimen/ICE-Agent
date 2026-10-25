@@ -38,4 +38,18 @@ export NEMOCLAW_NON_INTERACTIVE=1 NEMOCLAW_ACCEPT_THIRD_PARTY_SOFTWARE=1 NEMOCLA
 export NEMOCLAW_PROVIDER=vllm NEMOCLAW_MODEL="${QWEN_MODEL:-nvidia/Qwen3.6-35B-A3B-NVFP4}"
 export NEMOCLAW_SANDBOX_NAME="$SANDBOX" NEMOCLAW_POLICY_MODE=suggested
 export NEMOCLAW_CONTEXT_WINDOW="${NEMOCLAW_CONTEXT_WINDOW:-65536}" NEMOCLAW_MAX_TOKENS="${NEMOCLAW_MAX_TOKENS:-8192}"
-exec "$NC" onboard --non-interactive
+"$NC" onboard --non-interactive
+
+# 重建沙箱会丢掉 MCP 注册：主机侧 MCP（deploy/run_mcp_link.sh）在跑时自动重新注册（plan §9 step 5）。
+TOKEN_FILE="$HERE/../../deploy/local-secrets/mcp.token"
+MCP_IP="${ICE_MCP_PRIVATE_IP:-172.18.0.1}"
+if [ -f "$TOKEN_FILE" ] && ss -ltn | grep -q "$MCP_IP:8443 "; then
+  ICE_MCP_TOKEN="$(cat "$TOKEN_FILE")"; export ICE_MCP_TOKEN
+  # 旧沙箱的 MCP provider 会残留在 OpenShell 网关里；新沙箱没有对应策略时 mcp add 报
+  # "non-prefix partial state" 并拒绝注册，所以先删掉它（不存在时无害）。
+  PATH="$HOME/.local/bin:$PATH" sg docker -c "openshell provider delete $SANDBOX-mcp-ice-host" >/dev/null 2>&1 || true
+  "$NC" "$SANDBOX" mcp add ice-host --url "https://$MCP_IP:8443/mcp" --env ICE_MCP_TOKEN \
+    --trusted-private-host "$MCP_IP" | tail -2
+else
+  echo "MCP link not running; register later: nc.sh $SANDBOX mcp add ice-host --url https://$MCP_IP:8443/mcp ..." >&2
+fi

@@ -100,6 +100,9 @@ class Runtime:
         # Case whose agent run is in progress; host_exec ASKs are attributed to it.
         self._case_lock = threading.Lock()
         self.current_case: Optional[str] = None
+        # Read-only tool calls per case (plan risk: an agent that keeps exploring burns minutes per call).
+        self.tool_budget = int(__import__("os").environ.get("ICE_TOOL_BUDGET", "12"))
+        self._tool_calls: Dict[Optional[str], int] = {}
         # Hooks set by the ICE Gate service: called on a new ASK and on an explanation.
         self.on_ask: List[Callable[[PendingAction], None]] = []
         self.on_explain: List[Callable[[PendingAction], None]] = []
@@ -107,6 +110,14 @@ class Runtime:
     def set_current_case(self, case_id: Optional[str]) -> None:
         with self._case_lock:
             self.current_case = case_id
+            self._tool_calls.pop(case_id, None)
+
+    def spend_tool_call(self) -> bool:
+        """Count one read-only call against the current case; False once the budget is used up."""
+        with self._case_lock:
+            n = self._tool_calls.get(self.current_case, 0) + 1
+            self._tool_calls[self.current_case] = n
+            return n <= self.tool_budget
 
     def kill_switch(self, on: bool) -> None:
         """plan §3.4: emergency stop — every host_exec is denied while on."""

@@ -1,0 +1,292 @@
+"""Deterministic orchestrator (plan.md §3, §6.1).
+
+The daemon owns the control flow: perceive -> gate -> investigate -> safety gate -> execute ->
+audit -> backward. The LLM is free only inside the investigation step (and in writing the
+human explanation for an ASK); it never decides what runs next.
+
+One case per cycle: every entry the gate escalates in a cycle goes to the same case, so steps
+of one chain (download, chmod, cron, connection) are investigated together.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+import time
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
+
+from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
+from ice.daemon.contracts import Case, CaseStatus, ChangeEntry, GateDecision, new_id
+from ice.daemon.detect.gate import GateResult, evaluate_many
+from ice.daemon.investigate import agent, prompts
+from ice.daemon.investigate.case import build_case, extract_json
+from ice.daemon.mcp_server import IceTools
+from ice.daemon.perception import snapshot as snap_mod
+from ice.daemon.perception.diff import diff
+from ice.daemon.perception.logs import AuthLogWatcher
+from ice.daemon.perception.store import Baseline, SnapshotStore
+from ice.daemon.runtime import PendingAction, Runtime
+
+log = logging.getLogger("ice.orchestrator")
+
+_SHELL = re.compile(r"[;&|<>`$\\\n\r]")   # same class the safety gate treats as shell syntax
+
+
+class CaseStore:
+    def __init__(self, directory: Path):
+        self.dir = Path(directory)
+        self.dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._lock = threading.Lock()
+
+    def save(self, case: Case, **extra: Any) -> None:
+        path = self.dir / f"{case.case_id}.json"
+        with self._lock:
+            old = json.loads(path.read_text()) if path.exists() else {}
+            data = {**old.get("_ice", {}), **extra}
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({**case.to_dict(), "_ice": data}, ensure_ascii=False, indent=1, default=str))
+            tmp.chmod(0o600)
+            tmp.replace(path)
+
+    def load(self, case_id: str) -> Optional[Dict[str, Any]]:
+        path = self.dir / f"{case_id}.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    def case(self, case_id: str) -> Optional[Case]:
+        d = self.load(case_id)
+        return Case.from_dict(d) if d else None
+
+    def meta(self, case_id: str) -> Dict[str, Any]:
+        d = self.load(case_id) or {}
+        return d.get("_ice", {})
+
+    def all(self) -> List[Dict[str, Any]]:
+        return [json.loads(p.read_text()) for p in sorted(self.dir.glob("case-*.json"))]
+
+
+class Notifier:
+    """Slack output; the base class only logs (used until the Slack channel is configured)."""
+
+    def case_alert(self, case: Case, assessment: Optional[str], results: List[GateResult]) -> None:
+        log.info("ALERT %s assessment=%s attck=%s", case.case_id, assessment, case.attck)
+
+    def action_update(self, case: Case, command: str, decision: str, detail: str) -> None:
+        log.info("ACTION %s %s %s: %s", case.case_id, decision, command, detail)
+
+    def approval_request(self, p: PendingAction) -> None:
+        log.info("ASK %s for %s: %s", p.request_id, p.case_id, p.command)
+
+    def backward_report(self, case: Case, report: Any) -> None:
+        log.info("BACKWARD %s %s", case.case_id, getattr(report, "outcome", report))
+
+
+class Orchestrator:
+    def __init__(self, rt: Runtime, notifier: Optional[Notifier] = None):
+        self.rt = rt
+        sd = rt.conf.state_dir
+        self.store = SnapshotStore(sd / "snapshots")
+        self.baseline = Baseline(sd / "baseline.json")
+        self.authlog = AuthLogWatcher(self.baseline)
+        self.cases = CaseStore(sd / "cases")
+        self.tools = IceTools(rt)
+        self.notifier = notifier or Notifier()
+        self.cycles = 0
+        self._prev: Optional[snap_mod.Snapshot] = self.store.latest()
+        # First run ever: learn normal flow combinations for `warmup_cycles` before reporting them.
+        # After a restart the baseline exists, so changes made while ICE was down are still reported.
+        self._first_run = not self.baseline.size()
+        self._case_lock = threading.Lock()          # one agent investigation at a time
+        self._injected: List[ChangeEntry] = []
+        self._inject_lock = threading.Lock()
+        self.verifier = BackwardVerifier(snapshot_provider=self._backward_snapshot,
+                                         quality_judge=judge_quality_provider)
+        configure_backward(self.verifier)
+        rt.on_explain.append(self._on_explain)
+
+    # -- perception + gate ----------------------------------------------------
+    def inject(self, entries: List[ChangeEntry]) -> None:
+        """Replay synthetic change entries into the next cycle (testing without touching the host)."""
+        with self._inject_lock:
+            self._injected.extend(entries)
+
+    def cycle(self) -> Optional[str]:
+        snap = snap_mod.collect()
+        self.store.save(snap)
+        learning = self._first_run and self.cycles < self.rt.conf.warmup_cycles
+        entries = diff(self._prev, snap, self.baseline, learning=learning)
+        entries += self.authlog.poll()
+        with self._inject_lock:
+            injected, self._injected = self._injected, []
+        entries += injected
+        self._prev = snap
+        self.cycles += 1
+        if snap.errors:
+            log.warning("snapshot errors: %s", snap.errors)
+        if not entries:
+            return None
+        results = evaluate_many(entries)
+        escalated = [r for r in results if r.escalate]
+        self.rt.audit.write("gate", cycle=self.cycles, entries=len(entries), escalated=len(escalated),
+                            results=[{"entry": r.entry.entry_id, "table": r.entry.table, "value": r.entry.value[:200],
+                                      "priority": r.priority, "reasons": r.reasons} for r in results])
+        log.info("cycle %d: %d changes, %d escalated", self.cycles, len(entries), len(escalated))
+        if not escalated:
+            return None
+        return self.run_case(escalated, t1=snap)
+
+    # -- investigation ----------------------------------------------------------
+    def run_case(self, escalated: List[GateResult], t1: snap_mod.Snapshot) -> str:
+        case_id = new_id("case")
+        with self._case_lock:
+            self.rt.set_current_case(case_id)
+            try:
+                return self._investigate_and_respond(case_id, escalated, t1)
+            finally:
+                self.rt.set_current_case(None)
+
+    def _investigate_and_respond(self, case_id: str, escalated: List[GateResult], t1: snap_mod.Snapshot) -> str:
+        host = self.rt.conf.hostname
+        escalated = sorted(escalated, key=lambda r: r.priority != "high")
+        t0 = self.store.before(t1.ts)
+        meta = {"t0": t0.ts if t0 else None, "t1": t1.ts,
+                "trigger_keys": [{"table": r.entry.table, "key": r.entry.field} for r in escalated]}
+        msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated],
+                                   graph_available=getattr(self.rt, "graph", None) is not None)
+        self.rt.audit.write("case.open", case=case_id, escalations=len(escalated))
+        reply = agent.wake(case_id, msg)
+        case, assessment = build_case(case_id, host, reply.text, [r.entry.to_dict() for r in escalated])
+        if not reply.ok:
+            case.add_timeline(f"agent error: {reply.error}")
+        bad = [{"command": a.command, "problem": "uses shell syntax"} for a in case.proposed_actions if _SHELL.search(a.command)]
+        if bad and assessment != "benign":
+            revised = agent.wake(case_id, prompts.revise_actions_message(bad))
+            obj = extract_json(revised.text)
+            if obj and isinstance(obj.get("proposed_actions"), list):
+                case2, _ = build_case(case_id, host, revised.text, case.triggers, created=case.created)
+                case.proposed_actions = case2.proposed_actions
+                case.add_timeline("proposed actions revised to shell-free commands")
+        self.cases.save(case, **meta, assessment=assessment, agent={"seconds": reply.seconds, "tools": reply.tools,
+                                                                    "tokens_in": reply.tokens_in, "error": reply.error})
+        self.rt.audit.write("case.investigated", case=case_id, assessment=assessment, status=case.status.value,
+                            attck=case.attck, actions=[a.command for a in case.proposed_actions])
+        self.notifier.case_alert(case, assessment, escalated)
+        if case.status is CaseStatus.PROPOSED:
+            self._respond(case)
+        return case_id
+
+    # -- response ---------------------------------------------------------------
+    def _respond(self, case: Case) -> None:
+        case.status = CaseStatus.MITIGATING
+        outcomes = []
+        for action in case.proposed_actions:
+            r = self.tools.host_exec(action.command, action.intent)
+            decision = (r.content or {}).get("decision", "DENY")
+            outcomes.append({"action_id": action.action_id, "command": action.command, "decision": decision,
+                             "request_id": r.request_id, "error": r.error})
+            case.add_timeline(f"safety gate {decision}: {action.command}")
+            if decision == "ASK":
+                agent.wake(case.case_id, prompts.explain_request_message(
+                    r.request_id, action.command, action.intent, (r.content or {}).get("reason", "")))
+                p = self.rt.pending.get(r.request_id)
+                if p and not p.explanation:   # the agent did not call explain_for_human: fall back to its intent
+                    self.rt.pending.update(r.request_id, explanation=action.intent)
+                    p = self.rt.pending.get(r.request_id)
+                    self.notifier.approval_request(p)
+                self.notifier.action_update(case, action.command, "ASK", "waiting for human approval in ICE Gate")
+            elif decision == "AUTO":
+                res = ((r.content or {}).get("result") or {}).get("data") or {}
+                self.notifier.action_update(case, action.command, "AUTO", f"exit {res.get('returncode')}")
+            else:
+                self.notifier.action_update(case, action.command, "DENY", r.error or "denied")
+        self.cases.save(case, actions=outcomes)
+        if not any(o["decision"] == "ASK" for o in outcomes):
+            self.finish(case.case_id)
+
+    def _on_explain(self, p: PendingAction) -> None:
+        self.notifier.approval_request(p)
+
+    def on_approval(self, request_id: str, approved: bool, user_id: str) -> None:
+        """Called by the ICE Gate service after ApprovalStore.decide() accepted the click."""
+        p = self.rt.pending.get(request_id)
+        if p is None:
+            return
+        result = None
+        if approved:
+            from ice.daemon import executor
+            # Re-check hard stops right before running (kill switch, scope may have changed since approval).
+            if not self.rt.gate.current_policy_allows(p.command, self.rt.conf.hostname):
+                self.rt.pending.update(request_id, status="blocked")
+                self.rt.audit.write("host_exec.blocked_after_approval", case=p.case_id, command=p.command)
+                return
+            res = executor.run(p.command)
+            result = res.to_dict()
+            self.rt.audit.write("host_exec.executed", case=p.case_id, command=p.command, result=result,
+                                by=f"approval:{user_id}", request_id=request_id)
+        self.rt.pending.update(request_id, status="executed" if approved else "denied", result=result)
+        self.rt.audit.write("approval", request_id=request_id, approved=approved, user=user_id, case=p.case_id)
+        case = self.cases.case(p.case_id) if p.case_id else None
+        if case:
+            case.add_timeline(f"human {'approved' if approved else 'denied'}: {p.command}")
+            self.cases.save(case)
+            self.notifier.action_update(case, p.command, "APPROVED" if approved else "DENIED",
+                                        f"exit {result.get('returncode')}" if result else "not run")
+            threading.Thread(target=agent.wake, args=(case.case_id, prompts.result_message(
+                request_id, p.command, approved, result)), daemon=True).start()
+            if not [x for x in self.rt.pending.items.values() if x.case_id == case.case_id and x.status == "pending"]:
+                threading.Thread(target=self.finish, args=(case.case_id,), daemon=True).start()
+
+    # -- backward -----------------------------------------------------------------
+    def _backward_snapshot(self, case: Any, phase: str) -> Dict[str, Any]:
+        case_id = case.case_id if hasattr(case, "case_id") else case["case_id"]
+        m = self.cases.meta(case_id)
+        if phase == "T2":
+            s = snap_mod.collect()
+            self.store.save(s)
+            self.cases.save(self.cases.case(case_id), t2=s.ts)
+        else:
+            ts = m.get("t0") if phase == "T0" else m.get("t1")
+            s = self.store.at_or_after(ts) if ts else None
+            if s is None:
+                return {}
+        # Stable tables in full; flow tables only for the combinations this case was about —
+        # normal process churn would otherwise read as residue or collateral damage.
+        keys = {(k["table"], k["key"]) for k in m.get("trigger_keys", [])}
+        out: Dict[str, Any] = {"stable": s.data.get("stable", {})}
+        flow = {t: {k: v for k, v in rows.items() if (t, k) in keys} for t, rows in s.data.get("flow", {}).items()}
+        out["flow"] = {t: rows for t, rows in flow.items() if rows}
+        return out
+
+    def finish(self, case_id: str) -> None:
+        case = self.cases.case(case_id)
+        if case is None:
+            return
+        case.status = CaseStatus.VERIFYING
+        self.cases.save(case)
+        try:
+            report = self.verifier.verify(case)
+        except Exception as e:  # noqa: BLE001
+            log.exception("backward failed for %s", case_id)
+            self.rt.audit.write("backward.error", case=case_id, error=str(e))
+            return
+        res = report.result
+        case.status = CaseStatus.RESOLVED if res.verdict.value == "cleared" else CaseStatus.VERIFYING
+        case.add_timeline(f"backward: {report.outcome} score={report.overall_score:.2f}")
+        self.cases.save(case, backward=res.to_dict(), backward_outcome=report.outcome)
+        self.rt.audit.write("backward", case=case_id, verdict=res.verdict.value, score=res.total_score,
+                            missed_by_forward=len(res.missed_by_forward))
+        self.notifier.backward_report(case, report)
+
+    # -- main loop -------------------------------------------------------------------
+    def run_forever(self, stop: Optional[threading.Event] = None) -> None:
+        stop = stop or threading.Event()
+        interval = self.rt.conf.snapshot_interval_s
+        log.info("orchestrator started: interval %.0fs, warmup %d cycles", interval, self.rt.conf.warmup_cycles)
+        while not stop.is_set():
+            t = time.time()
+            try:
+                self.cycle()
+            except Exception:  # noqa: BLE001 — one bad cycle must not stop monitoring
+                log.exception("cycle failed")
+            stop.wait(max(1.0, interval - (time.time() - t)))

@@ -61,6 +61,10 @@ def _trim_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"rows": rows, "row_count": len(rows), "truncated": truncated}
 
 
+BUDGET_EXHAUSTED = ("Investigation tool budget for this case is used up. Do not call more tools: write the "
+                    "case JSON now from the evidence you have, marking anything unverified as unknown.")
+
+
 class IceTools:
     def __init__(self, rt: Runtime):
         self.rt = rt
@@ -68,7 +72,10 @@ class IceTools:
     # -- host_query ---------------------------------------------------------
     def host_query(self, sql_or_log: str) -> ToolResult:
         q = (sql_or_log or "").strip()
-        self.rt.audit.write("tool", tool=TOOL_HOST_QUERY, case=self.rt.current_case, query=q[:1000])
+        within = self.rt.spend_tool_call()
+        self.rt.audit.write("tool", tool=TOOL_HOST_QUERY, case=self.rt.current_case, query=q[:1000], within_budget=within)
+        if not within:
+            return ToolResult(False, TOOL_HOST_QUERY, error=BUDGET_EXHAUSTED)
         try:
             if re.match(r"^(select|with)\b", q, re.I):
                 return self._sql(q)
@@ -115,7 +122,11 @@ class IceTools:
 
     # -- graph_query --------------------------------------------------------
     def graph_query(self, cypher: str) -> ToolResult:
-        self.rt.audit.write("tool", tool=TOOL_GRAPH_QUERY, case=self.rt.current_case, query=(cypher or "")[:1000])
+        within = self.rt.spend_tool_call()
+        self.rt.audit.write("tool", tool=TOOL_GRAPH_QUERY, case=self.rt.current_case, query=(cypher or "")[:1000],
+                            within_budget=within)
+        if not within:
+            return ToolResult(False, TOOL_GRAPH_QUERY, error=BUDGET_EXHAUSTED)
         graph = getattr(self.rt, "graph", None)
         if graph is None:
             return ToolResult(False, TOOL_GRAPH_QUERY, error="Correlation graph is not available yet")
