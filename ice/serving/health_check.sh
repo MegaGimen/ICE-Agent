@@ -15,11 +15,8 @@ probe_vllm() {
   curl -sf -m 5 "http://localhost:$VLLM_PORT/health" >/dev/null 2>&1
 }
 probe_kev() {
-  # Kev 的 /v1/systemone 是 POST；就绪用一次最小 noul 探测（见 judge.py 协议）
-  curl -sf -m 5 -X POST "http://localhost:$KEV_PORT/v1/systemone" \
-    -H 'content-type: application/json' \
-    -d '{"type":"noul","question":"healthcheck","context":""}' >/dev/null 2>&1 \
-    || curl -sf -m 5 "http://localhost:$KEV_PORT/health" >/dev/null 2>&1
+  # Kev 实现 TypeSafe：GET /v1/models 在模型加载完成后才可用（serve.py）
+  curl -sf -m 5 "http://localhost:$KEV_PORT/v1/models" >/dev/null 2>&1
 }
 
 wait_for() {
