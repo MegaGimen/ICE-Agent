@@ -100,6 +100,13 @@ class Runtime:
             # Without a verified approval channel every ASK fails closed to DENY (gate.py).
             log.warning("Slack approval channel not configured: ASK actions will be denied")
         configure_safety_gate(self.gate)
+        # Correlation graph (plan §11): optional — the pipeline runs without it.
+        self.graph = None
+        try:
+            from ice.daemon.graph.store import Graph
+            self.graph = Graph(sd / "graph" / "kuzu", source=self.conf.hostname)
+        except Exception:  # noqa: BLE001
+            log.exception("correlation graph unavailable")
         # Case whose agent run is in progress; host_exec ASKs are attributed to it.
         self._case_lock = threading.Lock()
         self.current_case: Optional[str] = None

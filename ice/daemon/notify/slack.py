@@ -88,7 +88,8 @@ class SlackNotifier(Notifier):
         return None
 
     # -- Notifier -----------------------------------------------------------------
-    def case_alert(self, case: Case, assessment: Optional[str], results: List[GateResult]) -> None:
+    def case_alert(self, case: Case, assessment: Optional[str], results: List[GateResult],
+                   related: Optional[List[Dict[str, Any]]] = None) -> None:
         signals = "\n".join(
             f"• `{_clip(r.entry.table, 20)}` {_esc(_clip(r.entry.value, 140))}  — {', '.join(r.reasons[:4])}"
             for r in results[:8])
@@ -104,6 +105,11 @@ class SlackNotifier(Notifier):
                 {"type": "mrkdwn", "text": f"*IOC*\n{_esc(_clip(', '.join(case.ioc[:6]), 300)) or '—'}"},
             ]},
             {"type": "section", "text": {"type": "mrkdwn", "text": _clip(f"*Signals (detection gate)*\n{signals}", 2900)}},
+            *([{"type": "section", "text": {"type": "mrkdwn", "text": _clip(
+                "*Correlation graph: seen before*\n" + "\n".join(
+                    f"• {r['kind']} `{_esc(_clip(str(r['object']), 80))}` appeared in *{r['case_id']}* "
+                    f"({r['assessment']}, {r['created']}{'' if r.get('source') == self.conf.hostname else ', from ' + str(r.get('source'))})"
+                    for r in (related or [])[:6]), 2900)}}] if related else []),
             {"type": "section", "text": {"type": "mrkdwn", "text": _clip(f"*Proposed actions (each reviewed by the safety gate)*\n{actions}", 2900)}},
             {"type": "context", "elements": [{"type": "mrkdwn", "text": "Local inference only · host data never leaves this machine · actions reviewed by an out-of-sandbox safety gate"}]},
         ]

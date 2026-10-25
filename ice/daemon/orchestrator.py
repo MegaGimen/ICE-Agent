@@ -70,8 +70,9 @@ class CaseStore:
 class Notifier:
     """Slack output; the base class only logs (used until the Slack channel is configured)."""
 
-    def case_alert(self, case: Case, assessment: Optional[str], results: List[GateResult]) -> None:
-        log.info("ALERT %s assessment=%s attck=%s", case.case_id, assessment, case.attck)
+    def case_alert(self, case: Case, assessment: Optional[str], results: List[GateResult],
+                   related: Optional[List[Dict[str, Any]]] = None) -> None:
+        log.info("ALERT %s assessment=%s attck=%s related=%d", case.case_id, assessment, case.attck, len(related or []))
 
     def action_update(self, case: Case, command: str, decision: str, detail: str) -> None:
         log.info("ACTION %s %s %s: %s", case.case_id, decision, command, detail)
@@ -208,8 +209,23 @@ class Orchestrator:
         t0 = self.store.before(t1.ts)
         meta = {"t0": t0.ts if t0 else None, "t1": t1.ts,
                 "trigger_keys": [{"table": r.entry.table, "key": r.entry.field} for r in escalated]}
-        msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated],
-                                   graph_available=getattr(self.rt, "graph", None) is not None)
+        graph = getattr(self.rt, "graph", None)
+        accounts = set(t1.rows("accounts")) if "accounts" not in t1.errors else None
+        prior: List[Dict[str, Any]] = []
+        if graph is not None:
+            items = []
+            for r in escalated:
+                e = r.entry
+                items += [x for x in (e.src_ip, e.provenance.user, e.provenance.who, e.field.split("#", 1)[0]) if x]
+                items += [v for v in e.untrusted.values() if isinstance(v, str) and len(v) < 300 and v.startswith("/")]
+            try:
+                prior = graph.lookup(items, accounts)
+            except Exception:  # noqa: BLE001
+                log.exception("graph lookup failed")
+        experience = [f"- {p['kind']} {p['object']} appeared in {p['case_id']} ({p['assessment']}, {p['created']}): "
+                      f"{(p.get('summary') or '')[:200]}" for p in prior[:10]]
+        msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated], experience=experience or None,
+                                   graph_available=graph is not None)
         self.rt.audit.write("case.open", case=case_id, escalations=len(escalated))
         reply = agent.wake(case_id, msg)
         case, assessment = build_case(case_id, host, reply.text, [r.entry.to_dict() for r in escalated])
@@ -221,13 +237,36 @@ class Orchestrator:
             obj = extract_json(revised.text)
             if obj and isinstance(obj.get("proposed_actions"), list):
                 case2, _ = build_case(case_id, host, revised.text, case.triggers, created=case.created)
-                case.proposed_actions = case2.proposed_actions
-                case.add_timeline("proposed actions revised to shell-free commands")
-        self.cases.save(case, **meta, assessment=assessment, agent={"seconds": reply.seconds, "tools": reply.tools,
-                                                                    "tokens_in": reply.tokens_in, "error": reply.error})
+                kept, dropped = [], []
+                for a in case2.proposed_actions:
+                    # A revision that strips the arguments (bare `ls`, `rm`) and parks them in `targets`
+                    # would hand a meaningless command to approval: drop it instead.
+                    if _SHELL.search(a.command) or (len(a.command.split()) == 1 and a.targets):
+                        dropped.append(a.command)
+                    else:
+                        kept.append(a)
+                case.proposed_actions = kept
+                case.add_timeline("proposed actions revised to shell-free commands"
+                                  + (f"; dropped unusable: {dropped}" if dropped else ""))
+            else:
+                case.proposed_actions = [a for a in case.proposed_actions if not _SHELL.search(a.command)]
+                case.add_timeline("revision failed; actions with shell syntax dropped")
+            if not case.proposed_actions and case.status is CaseStatus.PROPOSED:
+                case.status = CaseStatus.INVESTIGATING
+        related: List[Dict[str, Any]] = []
+        if graph is not None:
+            try:
+                written = graph.record_case(case, assessment, accounts)
+                related = graph.related_cases(case)
+                self.rt.audit.write("graph.write", case=case_id, **written, related=len(related))
+            except Exception:  # noqa: BLE001
+                log.exception("graph write failed")
+        self.cases.save(case, **meta, assessment=assessment, related=related,
+                        agent={"seconds": reply.seconds, "tools": reply.tools,
+                               "tokens_in": reply.tokens_in, "error": reply.error})
         self.rt.audit.write("case.investigated", case=case_id, assessment=assessment, status=case.status.value,
                             attck=case.attck, actions=[a.command for a in case.proposed_actions])
-        self.notifier.case_alert(case, assessment, escalated)
+        self.notifier.case_alert(case, assessment, escalated, related)
         if case.status is CaseStatus.PROPOSED:
             self._respond(case)
         return case_id
