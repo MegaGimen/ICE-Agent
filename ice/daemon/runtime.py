@@ -6,6 +6,7 @@ are tied together on the host where the agent cannot touch them.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import threading
@@ -121,7 +122,8 @@ class Runtime:
 
     def kill_switch(self, on: bool) -> None:
         """plan §3.4: emergency stop — every host_exec is denied while on."""
-        self.gate.policy.kill_switch = on
+        # SafetyPolicy is frozen (safety/gate.py): swap in a copy rather than mutating it.
+        self.gate.policy = dataclasses.replace(self.gate.policy, kill_switch=on)
         self.audit.write("kill_switch", on=on)
 
 
