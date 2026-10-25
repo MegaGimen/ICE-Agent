@@ -71,6 +71,13 @@ class Table:
     drop: Tuple[str, ...] = ()                 # fields used only for keys/provenance
 
 
+def _listen_port(r: Row) -> str:
+    port = str(r.get("port", ""))
+    if r.get("address") in ("127.0.0.1", "::1") and port.isdigit() and int(port) >= 32768:
+        return "ephemeral"
+    return port
+
+
 def _cron_user(path: str) -> Optional[str]:
     m = re.match(r"^/var/spool/cron/(?:crontabs/)?([^/]+)$", path or "")
     return m.group(1) if m else ("root" if path in ("/etc/crontab",) or (path or "").startswith("/etc/cron") else None)
@@ -130,12 +137,14 @@ TABLES: List[Table] = [
         untrusted=("comment", "key_file"),
         summary=lambda r: f"SSH authorized key for {r.get('username')} ({r.get('algorithm')})",
     ),
+    # Loopback listeners on ephemeral ports (dev tools, language servers, CLIs) change on every run and are
+    # unreachable from outside: one bucket per program. Any non-loopback or fixed-port listener stays exact.
     Table(
         "listening_ports", ChangeType.LISTEN_PORT, "stable",
         "SELECT l.protocol, l.address, l.port, p.name, p.path, u.username "
         "FROM listening_ports l LEFT JOIN processes p USING (pid) LEFT JOIN users u ON p.uid = u.uid "
         "WHERE l.protocol IN (6, 17) AND l.port != 0",
-        key=lambda r: f"{'tcp' if r.get('protocol') == '6' else 'udp'}/{r.get('address')}/{r.get('port')}/{_proc_label(r.get('path', ''), r.get('name', ''))}",
+        key=lambda r: f"{'tcp' if r.get('protocol') == '6' else 'udp'}/{r.get('address')}/{_listen_port(r)}/{_proc_label(r.get('path', ''), r.get('name', ''))}",
         provenance=lambda r: Provenance(who=_proc_label(r.get("path", ""), r.get("name", "")), user=r.get("username")),
         untrusted=("name", "path"),
         summary=lambda r: f"listening {'tcp' if r.get('protocol') == '6' else 'udp'} {r.get('address')}:{r.get('port')}",
