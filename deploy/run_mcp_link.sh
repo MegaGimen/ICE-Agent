@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Start the MCP link: link-test MCP on 127.0.0.1:8083 + nginx TLS on PRIVATE_IP:8443 (plan §9 step 4).
-# Usage: deploy/run_mcp_link.sh [start|stop|status]
-# Token lives in deploy/local-secrets/mcp.token (gitignored). Swap the link-test server for
-# ice/daemon/mcp_server.py later; nginx and the NemoClaw registration stay the same.
+# Start the MCP link: ICE MCP server on 127.0.0.1:8083 + nginx TLS on PRIVATE_IP:8443 (plan §9 step 4).
+# Usage: deploy/run_mcp_link.sh [start|stop|status]     ICE_MCP_APP=linktest serves the ping-only test server.
+# Token lives in deploy/local-secrets/mcp.token (gitignored). When the full daemon (ice.daemon.main) runs, it
+# hosts the MCP server itself; then only nginx is needed from this script (ICE_MCP_APP=none).
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 S="$D/local-secrets"
@@ -27,10 +27,11 @@ http {
   include $RUN/server.conf;
 }
 CONF
-  if ! ss -ltn | grep -q '127.0.0.1:8083 '; then
-    ICE_MCP_TOKEN="$(cat "$S/mcp.token")" nohup "$HOME/ice-envs/daemon-env/bin/python" "$D/mcp_link_test.py" \
-      > "$RUN/mcp.log" 2>&1 &
-    echo "link-test MCP pid $!"
+  if [ "${ICE_MCP_APP:-ice}" != none ] && ! ss -ltn | grep -q '127.0.0.1:8083 '; then
+    if [ "${ICE_MCP_APP:-ice}" = linktest ]; then APP=("$D/mcp_link_test.py"); else APP=(-m ice.daemon.mcp_server); fi
+    (cd "$(dirname "$D")" && ICE_MCP_TOKEN="$(cat "$S/mcp.token")" nohup "$HOME/ice-envs/daemon-env/bin/python" "${APP[@]}" \
+      > "$RUN/mcp.log" 2>&1 &)
+    echo "MCP server (${ICE_MCP_APP:-ice}) started"
   fi
   sudo nginx -t -c "$RUN/nginx.conf" -p "$RUN" 2>&1 | tail -1
   if [ -f "$RUN/nginx.pid" ] && sudo kill -0 "$(cat "$RUN/nginx.pid")" 2>/dev/null; then
