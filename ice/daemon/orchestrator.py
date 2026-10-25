@@ -37,6 +37,10 @@ log = logging.getLogger("ice.orchestrator")
 _SHELL = re.compile(r"[;&|<>`$\\\n\r]")   # same class the safety gate treats as shell syntax
 
 
+class _SkipErrorBook(Exception):
+    pass
+
+
 class CaseStore:
     def __init__(self, directory: Path):
         self.dir = Path(directory)
@@ -493,6 +497,9 @@ class Orchestrator:
         self.rt.audit.write("backward", case=case_id, verdict=res.verdict.value, score=res.total_score,
                             missed_by_forward=len(res.missed_by_forward))
         try:
+            if self.cases.meta(case_id).get("replay"):
+                # Synthetic replay: nothing happened on the host, so a "miss" is an artifact, not a lesson.
+                raise _SkipErrorBook
             book = ErrorBook(self.rt.conf.state_dir / "errorbook.sqlite3")
             try:
                 recorded = book.record_backward_misses(res)
@@ -500,6 +507,8 @@ class Orchestrator:
                 book.close()
             if recorded:
                 self.rt.audit.write("evolve.misses_recorded", case=case_id, count=len(recorded))
+        except _SkipErrorBook:
+            pass
         except Exception as e:  # noqa: BLE001 — reporting must continue if the local error book fails
             log.exception("error book write failed for %s", case_id)
             self.rt.audit.write("evolve.error", case=case_id, error=str(e))
