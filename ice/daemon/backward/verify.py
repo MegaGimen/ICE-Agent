@@ -34,6 +34,7 @@ class VerificationReport:
     extend_observation: bool
     deeper_checks: tuple[str, ...]
     report_card: dict[str, Any]
+    observation_pending: bool = False
 
 
 @dataclass
@@ -57,6 +58,7 @@ class BackwardVerifier:
         residue = False
         collateral = False
         recurrence = False
+        unexplained_flow = False
         coverage_gap = False
         missing = object()
 
@@ -65,10 +67,18 @@ class BackwardVerifier:
             before, detected, after = (snapshot.get(path, missing) for snapshot in (t0, t1, t2))
             if detected == before and after == before:
                 continue
+            is_flow = path.startswith("flow.")
+            if is_flow and before is not missing and after is missing:
+                # A baseline process or connection ending is routine flow
+                # churn, even if its row changed briefly at T1.
+                continue
             probes += 1
             if after != before:
                 failures += 1
-                if detected != before:
+                if is_flow and before is missing and detected is missing:
+                    kind = "unexplained_t2_flow"
+                    unexplained_flow = True
+                elif detected != before:
                     kind = "residual_change"
                     residue = True
                 else:
@@ -97,7 +107,11 @@ class BackwardVerifier:
             evidence.append({"probe": "service_health", "path": path,
                              "result": "healthy" if healthy else "unhealthy", "value": value})
 
-        attacked_paths = {path for path in t0.keys() | t1.keys() if t1.get(path, missing) != t0.get(path, missing)}
+        attacked_paths = {
+            path for path in t0.keys() | t1.keys()
+            if t1.get(path, missing) != t0.get(path, missing)
+            and (not path.startswith("flow.") or t1.get(path, missing) is not missing)
+        }
         for index, observed in enumerate(observations):
             for path in attacked_paths:
                 if t2.get(path, missing) == t0.get(path, missing) and observed.get(path, missing) != t0.get(path, missing):
@@ -139,6 +153,8 @@ class BackwardVerifier:
             outcome = "indeterminate"
         elif recurrence or residue:
             outcome = "partial" if failures < probes else "not_cleared"
+        elif unexplained_flow:
+            outcome = "indeterminate"
         elif collateral:
             outcome = "cleared_with_collateral_impact"
         else:
@@ -146,7 +162,7 @@ class BackwardVerifier:
         confidence = min(1.0, (0.65 if probes else 0.0) + 0.35 * judge_confidence)
         if not observations:
             confidence = min(confidence, 0.75)
-        if not attack_observed or coverage_gap:
+        if not attack_observed or coverage_gap or unexplained_flow:
             confidence = min(confidence, 0.4)
         extend = confidence < 0.70 or residue or recurrence or outcome == "indeterminate"
         deeper = ("verify_system_files", "check_deleted_running_processes", "inspect_recent_system_changes") if extend else ()
@@ -164,6 +180,7 @@ class BackwardVerifier:
                 for item in evidence
             ],
             "next_steps": list(deeper),
+            "observation_pending": not bool(observations),
         }
         verdict = {
             "fully_cleared": CleanupVerdict.CLEARED,
@@ -173,7 +190,8 @@ class BackwardVerifier:
             "indeterminate": CleanupVerdict.PARTIAL,
         }[outcome]
         residuals = [item for item in evidence if item.get("result") in {
-            "residual_change", "present", "reappeared", "unobserved", "unexplained_t2_change"
+            "residual_change", "present", "reappeared", "unobserved", "unexplained_t2_change",
+            "unexplained_t2_flow",
         }]
         explicitly_listed = set(_indicators(_field(case, "blast_radius", ()))) | set(
             _indicators(_field(case, "ioc", ()))
@@ -192,7 +210,8 @@ class BackwardVerifier:
             case_id=case_id,
         )
         return VerificationReport(contract_result, case_id, outcome, confidence, deterministic_score,
-                                  quality_score, overall, tuple(evidence), extend, deeper, card)
+                                  quality_score, overall, tuple(evidence), extend, deeper, card,
+                                  not bool(observations))
 
 
 _configured: BackwardVerifier | None = None
@@ -213,7 +232,17 @@ def run_backward(case: object) -> BackwardResult:
 
 def judge_quality_provider(case: object, evidence: list[dict[str, Any]]) -> Mapping[str, Any]:
     """Score response quality with the frozen intake-side judge() helper."""
-    context = json.dumps({"case_id": _field(case, "case_id", "unknown"), "evidence": evidence},
+    # Full flow views can contain many volatile rows. Keep Kev context bounded;
+    # deterministic probes still inspect every field before this summary.
+    relevant = [item for item in evidence if item.get("result") in {
+        "residual_change", "unexplained_t2_change", "unexplained_t2_flow", "present", "reappeared", "unobserved"
+    }]
+    summary = [
+        {key: str(item[key])[:200] for key in ("probe", "path", "result", "indicator") if key in item}
+        for item in relevant[:80]
+    ]
+    context = json.dumps({"case_id": _field(case, "case_id", "unknown"),
+                          "finding_count": len(relevant), "findings": summary},
                          ensure_ascii=False, default=str)
     response = judge(JudgeQuery(
         kind=JudgeKind.SCORE,
@@ -224,13 +253,14 @@ def judge_quality_provider(case: object, evidence: list[dict[str, Any]]) -> Mapp
     if response.score is None:
         raise ValueError("Kev omitted backward quality score")
     explanations = []
-    for item in evidence:
-        if item.get("result") not in {"residual_change", "unexplained_t2_change"}:
+    for item in relevant[:12]:
+        if item.get("result") not in {"residual_change", "unexplained_t2_change", "unexplained_t2_flow"}:
             continue
         choice = judge(JudgeQuery(
             kind=JudgeKind.CHOICE,
             question="What best explains this remaining change?",
-            context=json.dumps(item, ensure_ascii=False, default=str),
+            context=json.dumps({key: str(item[key])[:200] for key in ("probe", "path", "result") if key in item},
+                               ensure_ascii=False),
             options=["attack_residue", "normal_change", "remediation_side_effect", "uncertain"],
         ))
         explanations.append({"path": item.get("path"), "explanation": choice.choice,
