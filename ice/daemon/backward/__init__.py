@@ -1,5 +1,5 @@
 """Post-remediation verification."""
 
-from .verify import BackwardVerifier, configure_backward, run_backward
+from .verify import BackwardVerifier, VerificationReport, configure_backward, judge_quality_provider, run_backward
 
-__all__ = ["BackwardVerifier", "configure_backward", "run_backward"]
+__all__ = ["BackwardVerifier", "VerificationReport", "configure_backward", "judge_quality_provider", "run_backward"]

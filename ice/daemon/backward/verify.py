@@ -9,6 +9,10 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+import json
+
+from ice.daemon.contracts import BackwardResult, CleanupVerdict, JudgeKind, JudgeQuery
+from ice.daemon.judge import judge
 
 
 Snapshot = Mapping[str, Any]
@@ -18,7 +22,8 @@ ObservationProvider = Callable[[object], Iterable[Snapshot]]
 
 
 @dataclass(frozen=True)
-class BackwardResult:
+class VerificationReport:
+    result: BackwardResult
     case_id: str
     outcome: str
     confidence: float
@@ -38,6 +43,9 @@ class BackwardVerifier:
     observation_provider: ObservationProvider | None = None
 
     def run_backward(self, case: object) -> BackwardResult:
+        return self.verify(case).result
+
+    def verify(self, case: object) -> VerificationReport:
         case_id = str(_field(case, "case_id", "unknown"))
         t0 = _flatten(self.snapshot_provider(case, "T0"))
         t1 = _flatten(self.snapshot_provider(case, "T1"))
@@ -151,8 +159,33 @@ class BackwardVerifier:
             ],
             "next_steps": list(deeper),
         }
-        return BackwardResult(case_id, outcome, confidence, deterministic_score, quality_score,
-                              overall, tuple(evidence), extend, deeper, card)
+        verdict = {
+            "fully_cleared": CleanupVerdict.CLEARED,
+            "partial": CleanupVerdict.PARTIAL,
+            "not_cleared": CleanupVerdict.NOT_CLEARED,
+            "cleared_with_collateral_impact": CleanupVerdict.CLEARED_COLLATERAL,
+            "indeterminate": CleanupVerdict.PARTIAL,
+        }[outcome]
+        residuals = [item for item in evidence if item.get("result") in {
+            "residual_change", "present", "reappeared", "unobserved", "unexplained_t2_change"
+        }]
+        blast_radius = set(_indicators(_field(case, "blast_radius", ())))
+        missed = [item for item in residuals if item.get("probe") == "full_snapshot"
+                  and not any(target == item.get("path") or target in str(item.get("path", "")).split(".")
+                              for target in blast_radius)]
+        contract_result = BackwardResult(
+            verdict=verdict,
+            total_score=overall,
+            probe_score=deterministic_score,
+            kev_score=quality_score,
+            residuals=residuals,
+            business_impact="unexplained post-remediation change" if collateral else "indeterminate" if coverage_gap else "none observed",
+            recurrence=recurrence,
+            missed_by_forward=missed,
+            case_id=case_id,
+        )
+        return VerificationReport(contract_result, case_id, outcome, confidence, deterministic_score,
+                                  quality_score, overall, tuple(evidence), extend, deeper, card)
 
 
 _configured: BackwardVerifier | None = None
@@ -169,6 +202,34 @@ def run_backward(case: object) -> BackwardResult:
     if _configured is None:
         raise RuntimeError("Backward verifier is not configured")
     return _configured.run_backward(case)
+
+
+def judge_quality_provider(case: object, evidence: list[dict[str, Any]]) -> Mapping[str, Any]:
+    """Score response quality with the frozen intake-side judge() helper."""
+    context = json.dumps({"case_id": _field(case, "case_id", "unknown"), "evidence": evidence},
+                         ensure_ascii=False, default=str)
+    response = judge(JudgeQuery(
+        kind=JudgeKind.SCORE,
+        question="How complete was the remediation, accounting for residue, recurrence, and business impact?",
+        context=context,
+        options=["failed", "mostly failed", "partial", "mostly complete", "complete without collateral impact"],
+    ))
+    if response.score is None:
+        raise ValueError("Kev omitted backward quality score")
+    explanations = []
+    for item in evidence:
+        if item.get("result") not in {"residual_change", "unexplained_t2_change"}:
+            continue
+        choice = judge(JudgeQuery(
+            kind=JudgeKind.CHOICE,
+            question="What best explains this remaining change?",
+            context=json.dumps(item, ensure_ascii=False, default=str),
+            options=["attack_residue", "normal_change", "remediation_side_effect", "uncertain"],
+        ))
+        explanations.append({"path": item.get("path"), "explanation": choice.choice,
+                             "confidence": choice.confidence})
+    return {"quality_score": response.score, "confidence": response.confidence,
+            "explanations": explanations}
 
 
 def _field(case: object, name: str, default: Any) -> Any:

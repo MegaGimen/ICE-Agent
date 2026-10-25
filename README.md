@@ -11,11 +11,14 @@ of ICE. See the local (uncommitted) `colab.md` and `plan.md` for architecture.
 - `ice/daemon/evolve/`: local SQLite error book and candidate retest gate.
 - `deploy/`: local CA creation, reverse proxy template, and human setup order.
 
-The intake-side `contracts.py`, `judge()`, orchestrator, MCP server, and host
-snapshot source are not checked into this branch yet. Configure the safety
-scorer and backward adapters when their interfaces are frozen. Without those
-dependencies the safety gate fails closed, and backward verification raises
-an error rather than claiming a result.
+The intake-side `contracts.py` and `judge()` are checked in and used by these
+modules. The orchestrator, MCP server, host snapshot source, and external ICE
+Gate callback are still pending. Configure the safety scorer, policy, approval
+queue, and backward adapters at daemon startup. Without those dependencies the
+safety gate fails closed, and backward verification raises an error rather
+than claiming a result. The current `host_exec(command: str, intent: str)`
+contract has no bound target, so it cannot pass the gate's scope check until
+the intake side supplies the actual target with the action.
 
 No component in this branch executes a host command, starts a service, sends a
 Slack message, or calls a remote model. Runtime SQLite files, certificates,

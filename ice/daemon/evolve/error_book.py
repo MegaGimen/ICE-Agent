@@ -114,11 +114,10 @@ class ErrorBook:
 
     def record_backward_misses(self, result: object) -> list[int]:
         """Capture residuals the forward case may have omitted."""
-        case_id = str(getattr(result, "case_id"))
+        contracted = getattr(result, "result", result)
+        case_id = str(getattr(contracted, "case_id"))
         recorded: list[int] = []
-        for item in getattr(result, "evidence"):
-            if item.get("result") not in {"residual_change", "present", "reappeared"}:
-                continue
+        for item in getattr(contracted, "missed_by_forward"):
             signal = str(item.get("path") or item.get("indicator") or "unknown")
             recorded.append(self.record_miss(case_id, signal, item))
         return recorded

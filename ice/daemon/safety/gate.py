@@ -13,19 +13,17 @@ from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 from threading import Lock
 from time import monotonic
-from typing import Callable, Mapping, Protocol, TypedDict
+from typing import Callable, Mapping, Protocol
 from uuid import uuid4
+import json
 import math
 import re
 import shlex
 
-
-class SafetyVerdict(TypedDict):
-    decision: str
-    scores: dict[str, float]
-    request_id: str | None
-    reason: str
-
+from ice.daemon.contracts import (
+    GateDecision, JudgeKind, JudgeQuery, ProposedAction, SafetyScores, SafetyVerdict,
+)
+from ice.daemon.judge import judge_batch
 
 @dataclass(frozen=True)
 class ApprovalRequest:
@@ -73,7 +71,7 @@ class SafetyGate:
     _times: deque[float] = field(default_factory=deque, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
-    def safety_gate(self, command: str | Mapping[str, object], intent: str | Mapping[str, object]) -> SafetyVerdict:
+    def safety_gate(self, command: str | Mapping[str, object] | ProposedAction, intent: str | Mapping[str, object]) -> SafetyVerdict:
         """Review the supplied command and explicit target, returning a verdict.
 
         Intent is untrusted explanatory text. It cannot approve or override a
@@ -149,17 +147,30 @@ class SafetyGate:
         return _verdict("ASK", reason, **_score_kwargs(shown_scores), request_id=request_id)
 
 
+_configured: SafetyGate | None = None
+
+
+def configure_safety_gate(gate: SafetyGate) -> None:
+    """Bind the host-owned policy, judge adapter, and approval queue at startup."""
+    global _configured
+    _configured = gate
+
+
 def safety_gate(
-    command: str | Mapping[str, object],
+    command: str | Mapping[str, object] | ProposedAction,
     intent: str | Mapping[str, object],
     *,
     gate: SafetyGate | None = None,
 ) -> SafetyVerdict:
     """Shared entry point. An unconfigured gate fails closed."""
-    return (gate or SafetyGate(SafetyPolicy())).safety_gate(command, intent)
+    return (gate or _configured or SafetyGate(SafetyPolicy())).safety_gate(command, intent)
 
 
-def _extract_command_and_target(command: str | Mapping[str, object]) -> tuple[str, str]:
+def _extract_command_and_target(command: str | Mapping[str, object] | ProposedAction) -> tuple[str, str]:
+    if isinstance(command, ProposedAction):
+        if len(command.targets) != 1:
+            return "", ""
+        return command.command.strip(), command.targets[0].strip()
     if isinstance(command, Mapping):
         raw = command.get("command", "")
         target = command.get("target", "")
@@ -204,6 +215,29 @@ def _score_kwargs(scores: Mapping[str, float]) -> dict[str, float]:
     }
 
 
+def judge_score_provider(command: str, target: str, intent: str) -> dict[str, float]:
+    """Map the intake side's frozen judge() helper onto four safety axes."""
+    context = json.dumps({"command": command, "target": target, "intent": intent}, ensure_ascii=False)
+    questions = {
+        "legit": "Is the exact action legitimate for the stated security incident?",
+        "needs_human": "How much human judgment is required before this exact action?",
+        "reversible": "How reversible are the exact effects of this action?",
+        "scope_match": "How closely do the actual effects match the stated intent and target?",
+    }
+    levels = ["very low", "low", "uncertain", "high", "very high"]
+    queries = {
+        name: JudgeQuery(kind=JudgeKind.SCORE, question=question, context=context, options=levels)
+        for name, question in questions.items()
+    }
+    responses = judge_batch(context, queries)
+    result: dict[str, float] = {}
+    for name, response in responses.items():
+        if response.score is None:
+            raise ValueError(f"Kev omitted {name} score")
+        result[name] = response.score
+    return result
+
+
 def _verdict(
     decision: str,
     reason: str,
@@ -214,9 +248,10 @@ def _verdict(
     scope: float = 0,
     request_id: str | None = None,
 ) -> SafetyVerdict:
-    return {
-        "decision": decision,
-        "scores": {"legit": legit, "needs_human": human, "reversible": reversible, "scope_match": scope},
-        "request_id": request_id,
-        "reason": reason,
-    }
+    safety = "safe" if decision == "AUTO" else "destructive" if reversible == 0 else "risky"
+    return SafetyVerdict(
+        decision=GateDecision(decision),
+        scores=SafetyScores(legit=legit, needs_human=human, reversible=reversible, scope_match=scope, safety=safety),
+        request_id=request_id,
+        reason=reason,
+    )
