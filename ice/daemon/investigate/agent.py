@@ -17,6 +17,9 @@ log = logging.getLogger("ice.agent")
 
 NC = Path(os.environ.get("ICE_NC", Path(__file__).resolve().parents[3] / "ice" / "serving" / "nc.sh"))
 SANDBOX = os.environ.get("NEMOCLAW_SANDBOX_NAME", "ice")
+# The sandbox is registered under this user's NemoClaw state (~/.nemoclaw, nvm node). When the daemon runs
+# as root (plan §6.1), agent wake-ups drop to that user instead of running nemoclaw as root.
+AGENT_USER = os.environ.get("ICE_AGENT_USER", "dell")
 
 
 @dataclass
@@ -34,6 +37,8 @@ class AgentReply:
 def wake(session_key: str, message: str, timeout: float = 900.0) -> AgentReply:
     t = time.time()
     argv = [str(NC), SANDBOX, "agent", "--session-key", session_key, "--json", "-m", message]
+    if os.geteuid() == 0 and AGENT_USER:
+        argv = ["sudo", "-u", AGENT_USER, "-H", "--"] + argv
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:

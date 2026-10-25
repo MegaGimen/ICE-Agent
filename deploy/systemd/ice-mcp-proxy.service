@@ -1,0 +1,15 @@
+[Unit]
+Description=ICE MCP TLS proxy (nginx on the openshell bridge IP :8443 -> 127.0.0.1:8083)
+# The bridge IP exists once Docker/OpenShell is up; restart until it can bind.
+After=docker.service network-online.target
+Wants=docker.service
+
+[Service]
+ExecStartPre=/usr/sbin/nginx -t -q -c /etc/ice/nginx-mcp.conf
+ExecStart=/usr/sbin/nginx -c /etc/ice/nginx-mcp.conf -g "daemon off;"
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

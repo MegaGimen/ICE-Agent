@@ -1,0 +1,20 @@
+[Unit]
+Description=ICE host daemon (perception, detection gate, orchestrator, safety gate, executor, ICE Gate)
+# vLLM (:8000) and Kev (:8010) are started by ice/serving/start_*.sh; the daemon tolerates them being late
+# (Kev down -> changes are escalated unjudged; agent errors are recorded on the case).
+After=network-online.target ice-embed.service ice-mcp-proxy.service
+Wants=ice-embed.service ice-mcp-proxy.service
+
+[Service]
+User=root
+WorkingDirectory=/home/dell/ICE
+Environment=ICE_STATE_DIR=/var/lib/ice ICE_AGENT_USER=dell PYTHONUNBUFFERED=1
+ExecStart=/home/dell/ice-envs/daemon-env/bin/python -m ice.daemon.main
+Restart=on-failure
+RestartSec=10
+# Stop the orchestrator loop (SIGTERM) and any agent wake-up it started.
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

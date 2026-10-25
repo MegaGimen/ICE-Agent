@@ -1,0 +1,14 @@
+[Unit]
+Description=ICE knowledge/experience retrieval (bge-m3 on CPU, 127.0.0.1:8020)
+After=network.target
+
+[Service]
+User=dell
+WorkingDirectory=/home/dell/ICE
+Environment=HF_HUB_CACHE=/home/dell/ice_models HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES=
+ExecStart=/home/dell/ice-envs/kev-env/bin/python -m ice.kb.embed_service
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
