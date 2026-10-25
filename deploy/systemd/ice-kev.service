@@ -8,7 +8,10 @@ OnFailure=ice-status@%n.service
 User=dell
 WorkingDirectory=/home/dell/ICE
 ExecStartPre=/home/dell/ice-envs/daemon-env/bin/python -m ice.daemon.notify.status kev starting "Kev-27B loading after vLLM"
-# Kev-27B needs ~64 GB of unified memory; refuse to start (and say so) rather than OOM the host.
+# vLLM just read ~22 GB of weights into the page cache, which hides that much CUDA-visible memory on
+# unified memory: drop it again before checking. Kev-27B needs ~64 GB; refuse (and say so) rather than OOM.
+ExecStartPre=+/bin/sh -c 'sync; echo 3 > /proc/sys/vm/drop_caches'
+
 ExecStartPre=/bin/bash -c 'source /home/dell/ICE/ice/serving/env.sh && "$VLLM_PY" /home/dell/ICE/ice/serving/free_mem.py 60'
 ExecStart=/home/dell/ICE/ice/serving/start_kev.sh --fg
 ExecStartPost=/home/dell/ICE/ice/serving/wait_ready.sh kev 900
