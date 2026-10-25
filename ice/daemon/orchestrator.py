@@ -22,6 +22,7 @@ from ice.daemon import kb
 from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
 from ice.daemon.contracts import Case, CaseStatus, ChangeEntry, GateDecision, new_id
 from ice.daemon.detect.gate import GateResult, evaluate_many
+from ice.daemon.evolve.error_book import ErrorBook
 from ice.daemon.investigate import agent, prompts
 from ice.daemon.investigate.case import build_case, extract_json
 from ice.daemon.mcp_server import IceTools
@@ -108,7 +109,8 @@ class Orchestrator:
         self._bg: List[threading.Thread] = []      # approval follow-ups and backward runs
         self._inject_lock = threading.Lock()
         self.verifier = BackwardVerifier(snapshot_provider=self._backward_snapshot,
-                                         quality_judge=judge_quality_provider)
+                                         quality_judge=judge_quality_provider,
+                                         observation_provider=self._backward_observations)
         configure_backward(self.verifier)
         rt.on_explain.append(self._on_explain)
 
@@ -119,8 +121,12 @@ class Orchestrator:
 
     def join_background(self, timeout: float = 600) -> None:
         deadline = time.time() + timeout
-        for t in list(self._bg):
-            t.join(max(0.0, deadline - time.time()))
+        while time.time() < deadline:
+            live = [t for t in self._bg if t.is_alive()]
+            if not live:
+                return
+            for t in live:
+                t.join(max(0.0, deadline - time.time()))
 
     # -- perception + gate ----------------------------------------------------
     def inject(self, entries: List[ChangeEntry], min_cycle: int = 2) -> None:
@@ -342,13 +348,85 @@ class Orchestrator:
                 self._spawn(self.finish, case.case_id)
 
     # -- backward -----------------------------------------------------------------
+    @staticmethod
+    def _backward_view(s: snap_mod.Snapshot, flow_keys: Dict[str, set[str]]) -> Dict[str, Any]:
+        # Compare flow by normalized key presence, not volatile cmdline/cwd/name
+        # fields. The candidate set includes every combination new during the
+        # case, including those the forward gate did not list as triggers.
+        if s.errors:
+            raise ValueError(f"Incomplete backward snapshot: {sorted(s.errors)}")
+        flow = {
+            table: {key: True for key in rows if key in flow_keys.get(table, set())}
+            for table, rows in s.data.get("flow", {}).items()
+        }
+        return {"stable": s.data.get("stable", {}), "flow": flow}
+
+    def _case_flow_keys(self, case_id: str) -> Dict[str, set[str]]:
+        # T2-only flows belong to later activity and are handled by the next
+        # forward cycle; only combinations present at detection can be tied to
+        # this case's cleanup. Do not limit these to reported trigger keys.
+        m = self.cases.meta(case_id)
+        t1 = self.store.load(m["t1"]) if m.get("t1") else None
+        if t1 is None or t1.errors:
+            raise ValueError("T1 flow snapshot is unavailable or incomplete")
+        t0_ts = m.get("t0")
+        t0 = self.store.load(t0_ts) if t0_ts else None
+        if t0 is not None and t0.errors:
+            raise ValueError("T0 flow snapshot is incomplete")
+        process_meta = t1.meta.get("processes", {})
+        own_pids = {str(os.getpid())}
+        for _ in range(len(process_meta)):
+            children = {str(meta.get("pid")) for meta in process_meta.values()
+                        if str(meta.get("ppid")) in own_pids}
+            if children <= own_pids:
+                break
+            own_pids.update(children)
+
+        candidates: Dict[str, set[str]] = {}
+        for table, rows in t1.data.get("flow", {}).items():
+            seen = self.baseline.seen.get(table, {})
+            selected = set()
+            for key in rows:
+                if t0 is not None and key in t0.data.get("flow", {}).get(table, {}):
+                    continue
+                first_seen = seen.get(key)
+                if t0_ts is not None and first_seen is not None and first_seen < t0_ts:
+                    continue  # known before this case: normal reappearance/churn
+                meta = t1.meta.get(table, {}).get(key, {})
+                if str(meta.get("pid")) in own_pids:
+                    continue
+                raw = meta.get("_row") or {}
+                name = str(raw.get("name") or "")
+                exe = str(raw.get("path") or "")
+                if table == "processes" and (name.startswith("kworker/") or
+                                              str(raw.get("parent_name") or "") == "kthreadd" or
+                                              "openshell-sandbox" in (exe or name).lower()):
+                    continue
+                if table == "connections":
+                    if "|public:*" in key:  # trusted-egress bucket from perception
+                        continue
+                    internal_mcp = (str(raw.get("remote_port")) == "8443"
+                                    and str(meta.get("remote_address")) in {"172.18.0.1", "172.17.0.1"}
+                                    and ("openshell" in exe.lower() or "nemoclaw" in exe.lower()
+                                         or "openshell" in name.lower() or "nemoclaw" in name.lower()))
+                    if internal_mcp:
+                        continue
+                selected.add(key)
+            candidates[table] = selected
+        return candidates
+
     def _backward_snapshot(self, case: Any, phase: str) -> Dict[str, Any]:
         case_id = case.case_id if hasattr(case, "case_id") else case["case_id"]
         m = self.cases.meta(case_id)
+        flow_keys = self._case_flow_keys(case_id)
         if phase == "T2":
-            s = snap_mod.collect()
-            self.store.save(s)
-            self.cases.save(self.cases.case(case_id), t2=s.ts)
+            if m.get("t2"):
+                s = self.store.load(m["t2"])
+            else:
+                s = snap_mod.collect()
+                self._backward_view(s, flow_keys)  # never store an incomplete T2 as a successful cleanup view
+                self.store.save(s)
+                self.cases.save(self.cases.case(case_id), t2=s.ts)
         else:
             ts = m.get("t0") if phase == "T0" else m.get("t1")
             if phase == "T0" and not ts:
@@ -356,16 +434,35 @@ class Orchestrator:
                 # cannot tell attack residue already present at T1 from the baseline; the report says so.
                 ts = m.get("t1")
                 self.cases.save(self.cases.case(case_id), t0_fallback="T1")
-            s = self.store.at_or_after(ts) if ts else None
+            s = self.store.load(ts) if ts else None
             if s is None:
                 return {}
-        # Stable tables in full; flow tables only for the combinations this case was about —
-        # normal process churn would otherwise read as residue or collateral damage.
-        keys = {(k["table"], k["key"]) for k in m.get("trigger_keys", [])}
-        out: Dict[str, Any] = {"stable": s.data.get("stable", {})}
-        flow = {t: {k: v for k, v in rows.items() if (t, k) in keys} for t, rows in s.data.get("flow", {}).items()}
-        out["flow"] = {t: rows for t, rows in flow.items() if rows}
-        return out
+        return self._backward_view(s, flow_keys)
+
+    def _backward_observations(self, case: Any) -> List[Dict[str, Any]]:
+        case_id = case.case_id if hasattr(case, "case_id") else case["case_id"]
+        t2 = self.cases.meta(case_id).get("t2")
+        flow_keys = self._case_flow_keys(case_id)
+        return [self._backward_view(s, flow_keys) for s in self.store.since(t2)[:12]] if t2 else []
+
+    def _followup_backward(self, case_id: str, delay: float) -> None:
+        # --once still gets a later observation. A running daemon may also have
+        # saved regular cycle snapshots during the wait.
+        threading.Event().wait(delay)
+        case = self.cases.case(case_id)
+        if case is None:
+            return
+        try:
+            observation = snap_mod.collect()
+            self._backward_view(observation, self._case_flow_keys(case_id))
+            self.store.save(observation)
+        except Exception as e:  # noqa: BLE001
+            log.exception("backward observation failed for %s", case_id)
+            self.rt.audit.write("backward.observation_error", case=case_id, error=str(e))
+            self.cases.save(case, backward_followup_scheduled=False)
+            return
+        self.cases.save(case, backward_followup_done=True)
+        self.finish(case_id)
 
     def finish(self, case_id: str) -> None:
         case = self.cases.case(case_id)
@@ -380,11 +477,28 @@ class Orchestrator:
             self.rt.audit.write("backward.error", case=case_id, error=str(e))
             return
         res = report.result
-        case.status = CaseStatus.RESOLVED if res.verdict.value == "cleared" else CaseStatus.VERIFYING
+        meta = self.cases.meta(case_id)
+        awaiting_observation = report.observation_pending
+        if awaiting_observation and not meta.get("backward_followup_done") and not meta.get("backward_followup_scheduled"):
+            delay = max(30.0, min(120.0, 2 * self.rt.conf.snapshot_interval_s))
+            self.cases.save(case, backward_followup_scheduled=True)
+            self._spawn(self._followup_backward, case_id, delay)
+        case.status = CaseStatus.RESOLVED if res.verdict.value == "cleared" and not awaiting_observation else CaseStatus.VERIFYING
         case.add_timeline(f"backward: {report.outcome} score={report.overall_score:.2f}")
         self.cases.save(case, backward=res.to_dict(), backward_outcome=report.outcome)
         self.rt.audit.write("backward", case=case_id, verdict=res.verdict.value, score=res.total_score,
                             missed_by_forward=len(res.missed_by_forward))
+        try:
+            book = ErrorBook(self.rt.conf.state_dir / "errorbook.sqlite3")
+            try:
+                recorded = book.record_backward_misses(res)
+            finally:
+                book.close()
+            if recorded:
+                self.rt.audit.write("evolve.misses_recorded", case=case_id, count=len(recorded))
+        except Exception as e:  # noqa: BLE001 — reporting must continue if the local error book fails
+            log.exception("error book write failed for %s", case_id)
+            self.rt.audit.write("evolve.error", case=case_id, error=str(e))
         self.notifier.backward_report(case, report)
         if self.cases.meta(case_id).get("t0_fallback"):
             self.notifier.action_update(case, "backward verification", "NOTE",

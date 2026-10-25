@@ -29,6 +29,8 @@ def slack_report_card(report: VerificationReport) -> dict[str, object]:
         f"Recurrence: {'yes' if result.recurrence else 'no'}"
     )
     next_steps = ", ".join(report.deeper_checks) if report.deeper_checks else "No extended checks requested"
+    observation = "Preliminary: waiting for post-remediation observation" if report.observation_pending else "Observation complete"
+    reason = str(report.report_card.get("reason") or "")
     return {
         "text": summary,
         "blocks": [
@@ -36,6 +38,8 @@ def slack_report_card(report: VerificationReport) -> dict[str, object]:
             {"type": "section", "text": {"type": "plain_text", "text": summary}},
             {"type": "section", "text": {"type": "plain_text", "text": score_line}},
             {"type": "section", "text": {"type": "plain_text", "text": finding_line}},
+            {"type": "context", "elements": [{"type": "plain_text", "text": observation}]},
+            *([{"type": "context", "elements": [{"type": "plain_text", "text": reason}]}] if reason else []),
             {"type": "context", "elements": [{"type": "plain_text", "text": f"Next: {next_steps}"}]},
         ],
     }
