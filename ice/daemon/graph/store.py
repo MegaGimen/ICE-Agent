@@ -206,6 +206,38 @@ class Graph:
                 {"k": c[1]})
         return out
 
+    def export(self, limit: int = 600) -> Dict[str, Any]:
+        """Nodes + edges for the dashboard visualization (read-only)."""
+        nodes: Dict[str, Dict[str, Any]] = {}
+        edges: List[Dict[str, Any]] = []
+
+        def node(group: str, key: str, label: str = "", title: str = "", extra: Optional[dict] = None) -> str:
+            nid = f"{group}:{key}"
+            if nid not in nodes:
+                nodes[nid] = {"id": nid, "group": group, "label": (label or key)[:40], "title": title or f"{group}: {key}", **(extra or {})}
+            return nid
+
+        for r in self._rows("MATCH (i:Incident) RETURN i.case_id AS c, i.assessment AS a, i.summary AS s LIMIT $n", {"n": limit}):
+            node("Incident", r["c"], label=r["c"], title=f"{r['c']} [{r.get('a')}]: {(r.get('s') or '')[:160]}",
+                 extra={"assessment": r.get("a")})
+        for r in self._rows("MATCH (t:Technique) RETURN t.id AS id LIMIT $n", {"n": limit}):
+            node("Technique", r["id"])
+        for r in self._rows("MATCH (h:Host) RETURN h.name AS n LIMIT $n", {"n": limit}):
+            node("Host", r["n"])
+        for tbl in OBJECT_TABLES:
+            for r in self._rows(f"MATCH (i:Incident)-[e:INVOLVES]->(o:{tbl}) RETURN i.case_id AS c, o.key AS k LIMIT $n", {"n": limit}):
+                node("Incident", r["c"], label=r["c"]); node(tbl, r["k"])
+                edges.append({"from": f"Incident:{r['c']}", "to": f"{tbl}:{r['k']}", "label": "involves"})
+        for r in self._rows("MATCH (i:Incident)-[:MAPS_TO]->(t:Technique) RETURN i.case_id AS c, t.id AS id LIMIT $n", {"n": limit}):
+            edges.append({"from": f"Incident:{r['c']}", "to": f"Technique:{r['id']}", "label": "maps_to"})
+        for r in self._rows("MATCH (i:Incident)-[:ON_HOST]->(h:Host) RETURN i.case_id AS c, h.name AS n LIMIT $n", {"n": limit}):
+            edges.append({"from": f"Incident:{r['c']}", "to": f"Host:{r['n']}", "label": "on_host"})
+        for r in self._rows("MATCH (p:Process)-[:CONNECTED_TO]->(ip:IP) RETURN p.key AS p, ip.key AS ip LIMIT $n", {"n": limit}):
+            edges.append({"from": f"Process:{r['p']}", "to": f"IP:{r['ip']}", "label": "connected_to"})
+        for r in self._rows("MATCH (a:Process)-[:SPAWNED]->(b:Process) RETURN a.key AS a, b.key AS b LIMIT $n", {"n": limit}):
+            edges.append({"from": f"Process:{r['a']}", "to": f"Process:{r['b']}", "label": "spawned"})
+        return {"nodes": list(nodes.values()), "edges": edges, "stats": self.stats()}
+
     def stats(self) -> Dict[str, int]:
         return {t: self._rows(f"MATCH (n:{t}) RETURN count(n) AS n")[0]["n"]
                 for t in ("Incident", "Technique", "Host", *OBJECT_TABLES)}

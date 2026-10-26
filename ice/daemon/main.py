@@ -132,6 +132,8 @@ def main() -> None:
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     threading.Thread(target=_watch_kill_switch, args=(rt, stop), name="kill-switch", daemon=True).start()
     _start_mcp(rt)
+    from ice.daemon import dashboard
+    dashboard.start(rt, port=int(os.environ.get("ICE_DASHBOARD_PORT", "8088")))
     if not a.once and not a.replay:   # resident service: report readiness and keep watching health
         from ice.daemon.notify import status
         if not _wait_for_models(stop):
