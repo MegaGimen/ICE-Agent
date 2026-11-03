@@ -215,49 +215,117 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
             "mtime_only": mtime_only, "retouched": retouched}
 
 
-def show(a: str, b: str, path: str, context: int = 3, max_bytes: int = 200_000) -> Dict[str, Any]:
-    """What changed in one path: a unified diff for text, a byte summary for anything else.
+def changes(a: str, b: str, hash_check: bool = False) -> List[Dict[str, Any]]:
+    """The union of paths from before and after, each annotated with whether it exists right now.
 
-    This is what a judge is given when it asks about a path -- the change, not the file. A snapshot
-    holds the whole machine, including material the episode never touched and secrets that are none
-    of the judge's business; handing back a diff keeps the answer to the question actually asked.
+    The union is the point: a file the episode deleted has a diff but no present-day existence, so
+    listing only what is on the machine would hide exactly the changes most worth looking at.
+    `exists_now` is read off the live filesystem rather than off the later snapshot, because the
+    machine is not rolled back for anyone to inspect -- the snapshots are the history, the machine
+    is the present, and a judge should be able to see when those two disagree.
+    """
+    d = diff(a, b, hash_check=hash_check)
+    ia, ib = index(a), index(b)
+    kinds = {FILE: "file", DIR: "dir", LINK: "symlink"}
+    out: List[Dict[str, Any]] = []
+    for group in ("removed", "added", "modified", "mtime_only", "retouched"):
+        for path in d[group]:
+            ea, eb = ia.get(path), ib.get(path)
+            out.append({
+                "path": path,
+                "status": group,
+                "kind": kinds.get((eb or ea)[0], "?"),
+                "size_before": ea[1] if ea else None,
+                "size_after": eb[1] if eb else None,
+                "exists_now": os.path.lexists(path),
+            })
+    return out
+
+
+def _read(fp: Path, max_bytes: int) -> Dict[str, Any]:
+    """One side of a file: text when it decodes, otherwise an honest binary record."""
+    if fp.is_symlink():
+        return {"kind": "symlink", "target": os.readlink(fp)}
+    if fp.is_dir():
+        return {"kind": "dir"}
+    try:
+        size = fp.stat().st_size
+        raw = fp.open("rb").read(max_bytes + 1)
+    except OSError as e:
+        return {"kind": "unreadable", "error": str(e)}
+    truncated = len(raw) > max_bytes
+    raw = raw[:max_bytes]
+    rec: Dict[str, Any] = {"kind": "file", "size": size, "sha256": _sha256(fp),
+                           "truncated": truncated}
+    try:
+        rec["text"] = raw.decode()
+    except UnicodeDecodeError:
+        rec["binary"] = True
+        rec["head_hex"] = raw[:64].hex()
+    return rec
+
+
+def content(label: str, path: str, max_bytes: int = 100_000) -> Dict[str, Any]:
+    """The bytes of one path, from a snapshot or from the machine as it is now.
+
+    label is a snapshot name, or "current" to read the live filesystem. Reading a snapshot never
+    touches the machine, so the before-bytes of something the episode deleted are still available
+    without restoring anything.
+    """
+    if label == "current":
+        fp = Path(path)
+    else:
+        if not (SNAP_ROOT / label).is_dir():
+            return {"path": path, "error": f"no snapshot named {label!r}"}
+        fp = SNAP_ROOT / label / path.lstrip("/")
+    if not (fp.exists() or fp.is_symlink()):
+        return {"path": path, "label": label, "exists": False}
+    return {"path": path, "label": label, "exists": True, **_read(fp, max_bytes)}
+
+
+def show(a: str, b: str, path: str, context: int = 3, max_diff_bytes: int = 200_000) -> Dict[str, Any]:
+    """What changed in one path: a unified diff, or a binary record when it is not text.
+
+    This is what a judge is handed when it asks about a path -- the change, not the file. A snapshot
+    holds the whole machine, including material the episode never touched, so answering with a diff
+    keeps the answer to the question actually asked; the bytes are still available through content()
+    when the diff is not enough.
+
+    Binary files are a change like any other, as in git: the entry is reported, both sides' size and
+    sha256 are given, and the diff says it is binary instead of the path being quietly dropped.
     """
     fa, fb = SNAP_ROOT / a / path.lstrip("/"), SNAP_ROOT / b / path.lstrip("/")
     ea, eb = fa.exists() or fa.is_symlink(), fb.exists() or fb.is_symlink()
-    out: Dict[str, Any] = {"path": path, "in_" + a: ea, "in_" + b: eb}
+    out: Dict[str, Any] = {"path": path, "exists_now": os.path.lexists(path),
+                           f"in_{a}": ea, f"in_{b}": eb}
     if not ea and not eb:
         out["status"] = "absent from both"
         return out
     out["status"] = "added" if not ea else "removed" if not eb else "modified"
+    sides = {}
     for side, fp, present in ((a, fa, ea), (b, fb, eb)):
-        if not present:
-            continue
-        if fp.is_symlink():
-            out[f"{side}_symlink_to"] = os.readlink(fp)
-        elif fp.is_dir():
-            out[f"{side}_kind"] = "directory"
-        else:
-            st = fp.stat()
-            out[f"{side}_size"] = st.st_size
-            out[f"{side}_sha256"] = _sha256(fp)
+        sides[side] = _read(fp, max_diff_bytes) if present else {"kind": "absent"}
+        out[side] = {k: v for k, v in sides[side].items() if k != "text"}
 
-    def text(fp: Path, present: bool) -> Optional[List[str]]:
-        if not present or fp.is_dir() or fp.is_symlink():
+    def lines(side: str) -> Optional[List[str]]:
+        rec = sides[side]
+        if rec["kind"] in ("absent", "dir"):
             return []
-        if fp.stat().st_size > max_bytes:
-            return None
-        try:
-            return fp.read_text(errors="strict").splitlines(keepends=True)
-        except (UnicodeDecodeError, OSError):
-            return None
+        if rec["kind"] == "symlink":
+            return [rec["target"] + "\n"]
+        if "text" not in rec:
+            return None                       # binary
+        return rec["text"].splitlines(keepends=True)
 
-    la, lb = text(fa, ea), text(fb, eb)
+    la, lb = lines(a), lines(b)
     if la is None or lb is None:
-        out["diff"] = None
-        out["diff_unavailable"] = "binary or larger than %d bytes" % max_bytes
+        out["binary"] = True
+        out["diff"] = "Binary files %s%s and %s%s differ" % (a, path, b, path)
         return out
-    out["diff"] = "".join(difflib.unified_diff(la, lb, fromfile=f"{a}{path}", tofile=f"{b}{path}",
+    out["diff"] = "".join(difflib.unified_diff(la, lb, fromfile=a + path, tofile=b + path,
                                                n=context))
+    if any(sides[k].get("truncated") for k in sides):
+        out["diff_truncated_at_bytes"] = max_diff_bytes
     return out
 
 
@@ -296,6 +364,14 @@ def main() -> None:
     s.add_argument("a")
     s.add_argument("b")
     s.add_argument("path")
+    ch = sub.add_parser("changes", help="the union of changed paths, with present-day existence")
+    ch.add_argument("a")
+    ch.add_argument("b")
+    ch.add_argument("--hash-check", action="store_true")
+    ct_ = sub.add_parser("content", help="the bytes of one path, from a snapshot or from 'current'")
+    ct_.add_argument("label")
+    ct_.add_argument("path")
+    ct_.add_argument("--max-bytes", type=int, default=100_000)
     r = sub.add_parser("restore", help="put the machine back to a snapshot")
     r.add_argument("label")
     r.add_argument("--dry-run", action="store_true")
@@ -333,6 +409,14 @@ def main() -> None:
                     print("  ", p)
                 if len(items) > a.limit:
                     print(f"   ... and {len(items) - a.limit} more")
+    elif a.cmd == "changes":
+        rows = changes(a.a, a.b, hash_check=a.hash_check)
+        print(f"{'status':<12}{'now':<5}{'kind':<8}path")
+        for r in rows:
+            print(f"{r['status']:<12}{'yes' if r['exists_now'] else 'NO':<5}{r['kind']:<8}{r['path']}")
+        print(f"\n{len(rows)} changed paths")
+    elif a.cmd == "content":
+        print(json.dumps(content(a.label, a.path, a.max_bytes), indent=1, ensure_ascii=False)[:8000])
     elif a.cmd == "show":
         res = show(a.a, a.b, a.path)
         d_ = res.pop("diff", None)
