@@ -499,6 +499,44 @@ def _osquery_snapshots(ep_dir: Path, case: Dict[str, Any]) -> Dict[str, Any]:
     return snaps
 
 
+EVIDENCE_DIFF_CAP = int(os.environ.get("ICE_EVIDENCE_DIFF_CAP", "20000"))
+
+
+def write_evidence(ep_dir: Path, images: Dict[str, str],
+                   changes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Store the evidence as the judge's tools return it, so the bundle stands on its own.
+
+    Two reasons, and the second is the one that shapes the format. The disks are qcow2 overlays that
+    will be pruned, and an episode whose evidence has been deleted cannot be re-scored -- the same
+    way early episodes became unscorable once the osquery snapshots their pointers named had aged
+    out of a 240-snapshot window. And if this data is ever used to train a judge, its inputs have to
+    be the inputs a judge is scored on; the way to make that true by construction is to store the
+    exact objects `list_changes` and `read_diff` hand over, rather than a summary of them.
+
+    Diffs are capped per path. A log that grew by megabytes says nothing more in its ten-thousandth
+    line, and the cap is recorded alongside so a reader knows the text was cut rather than short.
+    """
+    from ice.exercise import image
+    base, final = images["baseline"], images["final"]
+    diffs: Dict[str, Any] = {}
+    for row in changes:
+        if row["kind"] == "dir":
+            continue
+        diffs[row["path"]] = image.show(base, final, row["path"],
+                                        max_diff_bytes=EVIDENCE_DIFF_CAP)
+    payload = {
+        "images": images,
+        "diff_cap_bytes": EVIDENCE_DIFF_CAP,
+        "list_changes": changes,                 # exactly what the list_changes tool returns
+        "read_diff": diffs,                      # exactly what read_diff returns, per path
+    }
+    (ep_dir / "evidence.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
+    size = (ep_dir / "evidence.json").stat().st_size
+    print(f"  evidence: {len(diffs)} path diffs, {size / 1024:.0f} KiB "
+          f"(the bundle can be re-judged without the disks)")
+    return payload
+
+
 def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
            commands: List[Dict[str, Any]], refused: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Both halves of the score, each from the evidence that can actually see the thing.
@@ -520,6 +558,7 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     (ep_dir / "image-changes.json").write_text(json.dumps(
         {"images": images, "files": files, "baseline_to_final": changes,
          "armed_to_final": image.changes(armed, final)}, ensure_ascii=False, indent=1))
+    write_evidence(ep_dir, images, changes)
 
     runtime: Optional[Dict[str, Any]] = None
     snaps = _osquery_snapshots(ep_dir, case) if case else {}
@@ -543,7 +582,15 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     # files over /etc/passwd- while the judge, having read the contents, called it userdel's normal
     # behaviour and was right.
     verdict = judge_agent.judge(base, final, commands, refused, armed=armed)
+    # The verdict and the conversation that produced it are stored apart: one is the result, the
+    # other is the training pair -- the messages the judge saw and the tool results it was given.
+    transcript = verdict.pop("transcript", None)
     (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
+    if transcript is not None:
+        (ep_dir / "judge-transcript.json").write_text(json.dumps(
+            {"model": verdict.get("model"), "steps": verdict.get("steps"),
+             "usage": verdict.get("usage"), "messages": transcript},
+            ensure_ascii=False, indent=1))
     if verdict.get("error"):
         print(f"  !! damage judge failed: {verdict['error']}")
     else:

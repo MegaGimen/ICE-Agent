@@ -118,6 +118,11 @@ class Tools:
         self.before, self.after, self.armed = before, after, armed or before
         self._rows: Optional[List[Dict[str, Any]]] = None
         self._hash_check = hash_check
+        # Each call is kept with the result it returned. Recording only the call made the bundle
+        # unable to say what the judge saw, which is the same gap that left early episodes
+        # unscorable once the osquery snapshots they pointed at had been pruned. If this data is
+        # ever used to train a judge, the inputs have to be the ones a judge is scored on, and the
+        # way to guarantee that is to store what was actually handed over.
         self.calls: List[Dict[str, Any]] = []
         self.read_paths: List[str] = []
 
@@ -157,7 +162,7 @@ class Tools:
             result = {"error": f"bad arguments: {e}"}
         except Exception as e:                            # noqa: BLE001 - a tool fault is data
             result = {"error": f"{type(e).__name__}: {e}"}
-        self.calls.append({"tool": name, "args": args})
+        self.calls.append({"tool": name, "args": args, "result": result})
         return result
 
 
@@ -217,6 +222,7 @@ def judge(before: str, after: str, commands: List[Dict[str, Any]],
                         "raw_tail": text[-800:], "steps": step + 1,
                         "tool_calls": tools.calls, "usage": usage}
             obj.update({"steps": step + 1, "tool_calls": tools.calls,
+                        "transcript": messages,
                         "paths_read": sorted(set(tools.read_paths)),
                         "changed_paths": len(tools.rows()), "model": resp.get("model"),
                         "usage": usage})

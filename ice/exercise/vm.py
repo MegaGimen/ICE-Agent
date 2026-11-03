@@ -178,6 +178,17 @@ def drop(label: str) -> None:
         p.unlink(missing_ok=True)
 
 
+def taken_at(label: str) -> float:
+    """When a snapshot was made, from its sidecar metadata; the file's own mtime is the guest's."""
+    try:
+        return float(json.loads((OVERLAYS / f"{label}.meta.json").read_text())["taken"])
+    except (OSError, KeyError, ValueError):
+        try:
+            return overlay_path(label).stat().st_mtime
+        except OSError:
+            return 0.0
+
+
 def overlays() -> List[str]:
     found = [BASE_LABEL] if BASE.exists() else []
     if OVERLAYS.exists():
@@ -240,15 +251,51 @@ def mount(label: str) -> Path:
 
 
 def umount(label: str) -> None:
-    dev = _NBD_IN_USE.pop(label, None)
+    dev = _NBD_IN_USE.pop(label, None) or mounted().get(label, "").rstrip("p1") or None
     subprocess.run(["umount", str(MOUNTS / label)], capture_output=True)
     if dev:
         subprocess.run(["qemu-nbd", "--disconnect", dev], capture_output=True)
 
 
+def mounted() -> Dict[str, str]:
+    """{label: device} for every snapshot mounted under MOUNTS, read from /proc/mounts.
+
+    The in-memory registry is per process, so a mount outlives whatever made it and no later
+    process can find it -- three were left behind by debugging scripts, and `du` walking into them
+    reported the snapshot store as 17 GB when it held 4.8. Reading the real mount table is what
+    makes a leak cleanable by anyone.
+    """
+    out: Dict[str, str] = {}
+    try:
+        lines = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        dev, point = parts[0], parts[1].replace("\\040", " ")
+        if point.startswith(str(MOUNTS) + "/"):
+            out[Path(point).name] = dev
+    return out
+
+
 def umount_all() -> None:
-    for label in list(_NBD_IN_USE):
+    """Unmount every snapshot and release every nbd device, whoever mounted it."""
+    for label in set(list(_NBD_IN_USE) + list(mounted())):
         umount(label)
+    # An nbd device can stay connected after its mount is gone, which quietly uses up the 16 the
+    # module provides. Anything still holding a disk with nothing mounted on it is ours to release.
+    live = set(mounted().values())
+    for i in range(16):
+        dev = f"/dev/nbd{i}"
+        try:
+            if Path(f"/sys/block/nbd{i}/size").read_text().strip() == "0":
+                continue
+        except OSError:
+            continue
+        if dev not in live and f"{dev}p1" not in live:
+            subprocess.run(["qemu-nbd", "--disconnect", dev], capture_output=True)
 
 
 # ------------------------------------------------------------------ running one
@@ -408,6 +455,10 @@ def main() -> None:
     s.add_argument("label")
     s.add_argument("--of", required=True)
     sub.add_parser("list", help="list overlays")
+    sub.add_parser("clean", help="unmount every snapshot and release every nbd device")
+    pr = sub.add_parser("prune", help="delete the snapshots of all but the newest N episodes")
+    pr.add_argument("--keep", type=int, default=5)
+    pr.add_argument("--dry-run", action="store_true")
     e = sub.add_parser("exec", help="run a shell snippet inside")
     e.add_argument("script")
     a = ap.parse_args()
@@ -431,6 +482,25 @@ def main() -> None:
             img = overlay_path(label)
             actual = _run(["du", "-sh", str(img)], check=False).stdout.split("\t")[0] or "?"
             print(f"  {label:<40} {actual:>8}  running={running(label)}")
+    elif a.cmd == "clean":
+        umount_all()
+        print(f"  mounts left: {mounted() or 'none'}")
+    elif a.cmd == "prune":
+        # Episode snapshots are grouped by the label prefix the recorder gives them. The bundle
+        # carries the diffs, so dropping the disks costs re-reading the machine, not the evidence.
+        groups: Dict[str, List[str]] = {}
+        for label in overlays():
+            if label == BASE_LABEL:
+                continue
+            stem = label.rsplit("-", 1)[0]
+            groups.setdefault(stem, []).append(label)
+        order = sorted(groups, key=lambda g: max(taken_at(l) for l in groups[g]), reverse=True)
+        for stem in order[a.keep:]:
+            for label in groups[stem]:
+                print(f"  {'would drop' if a.dry_run else 'dropping'} {label}")
+                if not a.dry_run:
+                    drop(label)
+        print(f"  kept {min(len(order), a.keep)} of {len(order)} episodes")
     elif a.cmd == "exec":
         p = sh(a.script, check=False)
         print(p.stdout, end="")
