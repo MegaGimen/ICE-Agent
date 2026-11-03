@@ -33,7 +33,18 @@ class _AutoApproveStore(ApprovalStore):
     guard is deliberately kept: decide() calls approval_guard, so SafetyPolicy still refuses
     critical-asset, out-of-scope and kill-switched commands exactly as it would for a human.
     A refusal is logged and the request is left pending for the normal expiry sweep.
+
+    Approving only marks the row: the command is run by Orchestrator.on_approval, which the ICE Gate
+    service normally calls after a human clicks. With no Gate nobody calls it, so approved ASKs just
+    sat there and no remediation ever executed. Approved ids are therefore published on `sink` for
+    main.py's sweeper to feed to on_approval. It cannot be called from here: the gate queues the
+    request before the orchestrator registers the matching PendingAction, so on_approval would look
+    up a request_id that does not exist yet and silently return.
     """
+
+    def __init__(self, *args, sink=None, **kwargs):  # noqa: ANN001,ANN002,ANN003
+        super().__init__(*args, **kwargs)
+        self._sink = sink if sink is not None else []
 
     def put_nowait(self, request) -> None:  # noqa: ANN001 - matches SafetyGate's queue protocol
         super().put_nowait(request)
@@ -42,6 +53,7 @@ class _AutoApproveStore(ApprovalStore):
         except Exception as e:  # noqa: BLE001 - a policy refusal must not break the gate
             log.warning("auto-approve refused %r on %s: %s", request.command, request.target, e)
             return
+        self._sink.append(request.request_id)
         log.warning("AUTO-APPROVED (no human review) %r on %s", request.command, request.target)
 
 
@@ -126,6 +138,9 @@ class Runtime:
             log.warning("ICE_RECORD_MODE=1: Kev is not a safety-gate veto; actions are auto-approved "
                         "and executed for real. Critical assets are still denied.")
         self.approvals: Optional[ApprovalStore] = None
+        # Request ids approved with no human. main.py's sweeper feeds them to
+        # Orchestrator.on_approval, which is what actually runs the command.
+        self.auto_approved: list = []
         if auto_approve and not self.conf.slack_ready:
             # DEV ONLY: no Slack, no human. Every ASK is approved the moment the gate queues it, so the
             # whole forward flow (propose -> ASK -> approve -> execute -> backward) runs unattended.
@@ -138,6 +153,7 @@ class Runtime:
                                allowed_user_ids=frozenset({_AUTO_APPROVER}),
                                request_ttl_seconds=int(os.environ.get("ICE_APPROVAL_TTL", "600"))),
                 approval_guard=self.gate.current_policy_allows,
+                sink=self.auto_approved,
             )
             self.gate.approval_queue = self.approvals
             log.warning("ICE_AUTO_APPROVE=1: every ASK is approved locally with no human review "

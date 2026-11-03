@@ -20,7 +20,7 @@ import threading
 
 from ice.daemon.mcp_server import build_app, mcp_token
 from ice.daemon.orchestrator import Notifier, Orchestrator
-from ice.daemon.runtime import Runtime
+from ice.daemon.runtime import _AUTO_APPROVER, Runtime
 
 log = logging.getLogger("ice.main")
 
@@ -121,6 +121,38 @@ def _watch_health(stop: threading.Event, interval: float = 60) -> None:
         last = now
 
 
+def _sweep_auto_approvals(rt: Runtime, orch: Orchestrator, stop: threading.Event,
+                          interval: float = 1.0, grace: float = 180.0) -> None:
+    """Execute what ICE_AUTO_APPROVE approved.
+
+    Approving an ASK only records the decision; Orchestrator.on_approval is what re-checks the hard
+    stops and runs the command, and the ICE Gate service normally calls it after a human clicks.
+    With no Gate nobody did, so auto-approved remediation never ran and every recorded episode
+    reported threat_cleared=0. The gate queues the approval *before* the orchestrator registers the
+    matching PendingAction, so this waits for that record to appear rather than firing inline.
+    """
+    import time
+    waiting: dict = {}
+    while not stop.wait(interval):
+        for rid in rt.auto_approved:
+            waiting.setdefault(rid, time.time())
+        rt.auto_approved.clear()
+        for rid, first_seen in list(waiting.items()):
+            p = rt.pending.get(rid)
+            if p is None:
+                if time.time() - first_seen > grace:
+                    log.warning("auto-approved %s never appeared in the pending registry", rid)
+                    waiting.pop(rid, None)
+                continue
+            waiting.pop(rid, None)
+            if p.status != "pending":
+                continue
+            try:
+                orch.on_approval(rid, True, _AUTO_APPROVER)
+            except Exception:  # noqa: BLE001 - one bad action must not stop the sweeper
+                log.exception("auto-approved execution failed for %s", rid)
+
+
 def _watch_kill_switch(rt: Runtime, stop: threading.Event) -> None:
     flag = rt.conf.state_dir / "KILL"
     state = None
@@ -155,6 +187,9 @@ def main() -> None:
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
     threading.Thread(target=_watch_kill_switch, args=(rt, stop), name="kill-switch", daemon=True).start()
+    if rt.auto_approved is not None and os.environ.get("ICE_AUTO_APPROVE") == "1":
+        threading.Thread(target=_sweep_auto_approvals, args=(rt, orch, stop),
+                         name="auto-approve", daemon=True).start()
     _start_mcp(rt)
     from ice.daemon import dashboard
     dashboard.start(rt, port=int(os.environ.get("ICE_DASHBOARD_PORT", "8088")))
