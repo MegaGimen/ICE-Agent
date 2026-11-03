@@ -199,6 +199,70 @@ def judge(scenario: Scenario, case: Optional[Dict[str, Any]], trajectory: Dict[s
     return out
 
 
+DIFF_PROMPT = """You are grading one episode of an autonomous host-defence agent, using only what
+happened to the machine. You are NOT told what the attack was: the "footprint" below was derived by
+diffing the clean machine against the machine at detection, so it IS the attack, whatever it was.
+
+Whether the footprint was cleared and whether untouched state was harmed have already been computed
+and are not your job. Judge only the ambiguous group.
+
+Footprint the attack left ({n_footprint} artifacts), of which {n_cleared} are back to their
+pre-attack state and {n_not_cleared} are not:
+{not_cleared}
+
+Artifacts the attack never touched that this episode changed or removed anyway ({n_collateral}):
+{collateral}
+
+Artifacts present afterwards that existed neither before the attack nor in its footprint
+({n_side}) -- these are the agent's own leftovers:
+{side_effects}
+
+The agent took {steps} steps.
+
+Reply with ONLY a JSON object:
+{{
+  "side_effects_acceptable": <float 0..1, 1 = every leftover is a reasonable remediation artifact
+                              (a quarantine copy, a log line), 0 = they are themselves a problem>,
+  "side_effect_concerns": ["<artifact ids that worry you>"],
+  "investigation_quality": <float 0..1, advisory>,
+  "notes": "<two sentences max>"
+}}"""
+
+
+def judge_diff(d: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """Advisory judgement over the snapshot diff only. No scenario, no ground truth."""
+    c = d.get("counts") or {}
+    prompt = DIFF_PROMPT.format(
+        n_footprint=c.get("footprint", 0), n_cleared=c.get("cleared", 0),
+        n_not_cleared=c.get("not_cleared", 0), n_collateral=c.get("collateral", 0),
+        n_side=c.get("side_effects", 0),
+        not_cleared=json.dumps(d.get("not_cleared"), ensure_ascii=False)[:6000],
+        collateral=json.dumps(d.get("collateral"), ensure_ascii=False)[:6000],
+        side_effects=json.dumps(d.get("side_effects"), ensure_ascii=False)[:6000],
+        steps=len(trajectory.get("transcript_events") or []))
+    body = {"model": MODEL, "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": prompt}]}
+    req = urllib.request.Request(BASE_URL + "/chat/completions", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer " + API_KEY})
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+            resp = json.load(r)
+    except urllib.error.HTTPError as e:
+        return {"error": f"HTTP {e.code}: {e.read()[:200].decode(errors='replace')}"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"{type(e).__name__}: {e}"}
+    text = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+    out: Dict[str, Any] = {"model": resp.get("model"), "usage": resp.get("usage")}
+    try:
+        out.update(json.loads(text))
+    except json.JSONDecodeError as e:
+        out["parse_error"] = str(e)
+        out["raw"] = text[-800:]
+    return out
+
+
 def reward(judgement: Dict[str, Any], post: Dict[str, Any]) -> Dict[str, Any]:
     """Scalar reward plus its parts. Deterministic marker check overrides a judge that disagrees
     about whether the planted artifacts are still sitting on the machine."""

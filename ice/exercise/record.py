@@ -325,6 +325,36 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "scope_missed": scope_missed, "miss": not verdict_ok, "reasons": reasons}
 
 
+def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy the case's T0/T1/T2 snapshots into the bundle and score them without the scenario."""
+    from ice.exercise import evaluate, snapshot_reward as sr
+    ice = case.get("_ice") or {}
+    snaps: Dict[str, Any] = {}
+    for label in ("t0", "t1", "t2"):
+        ts = ice.get(label)
+        if ts is None:
+            print(f"  [snapshot] {label.upper()} pointer absent in the case")
+            continue
+        hits = sorted(glob.glob(str(STATE / "snapshots" / (str(ts).split(".")[0] + "*.json"))))
+        if not hits:
+            print(f"  [snapshot] {label.upper()}={ts} not on disk (pruned by the 240-snapshot window)")
+            continue
+        dst = ep_dir / f"snapshot-{label.upper()}.json"
+        shutil.copy2(hits[0], dst)
+        snaps[label] = sr.load(dst)
+    if len(snaps) < 3:
+        return {"error": f"need T0/T1/T2, got {sorted(snaps)}"}
+    d = sr.diff(snaps["t0"], snaps["t1"], snaps["t2"])
+    (ep_dir / "snapshot-diff.json").write_text(json.dumps(d, ensure_ascii=False, indent=1))
+    judgement = evaluate.judge_diff(d, trajectory)
+    out = sr.reward(d, judgement)
+    out["judgement"] = judgement
+    print(f"  snapshot diff: {d['counts']}")
+    print(f"  reward(scenario-free): value={out.get('value')} cleared={out.get('threat_cleared')} "
+          f"collateral={out.get('collateral_damage')} ({out.get('collateral_count')} artifacts)")
+    return out
+
+
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float) -> Dict[str, Any]:
     ep_dir.mkdir(parents=True, exist_ok=True)
     audit = STATE / "audit.jsonl"
@@ -347,7 +377,14 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
     rwd = evaluate.reward(judgement, post)
     (ep_dir / "post-state.json").write_text(json.dumps(post, ensure_ascii=False, indent=1))
     print(f"  post-state: {post['counts']} markers_clear={post['markers_clear']}")
-    print(f"  reward: {rwd}")
+    print(f"  reward(scenario-based): {rwd}")
+
+    # Scenario-free reward from ICE's own T0/T1/T2 snapshots. These must be copied out now: the
+    # perception store keeps only the last 240 snapshots (2h at a 30s cycle) and prunes the rest,
+    # so the case's t0/t1/t2 pointers go dangling long before anyone reads the bundle.
+    snap_reward: Dict[str, Any] = {"skipped": "no case"}
+    if case:
+        snap_reward = _snapshot_reward(ep_dir, case, trajectory)
     meta = {
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
@@ -363,7 +400,8 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         "post_state_counts": post["counts"],
         "markers_clear": post["markers_clear"],
         "agent_judgement": judgement,
-        "reward": rwd,
+        "reward": rwd,                      # scenario-based (markers + declared artifacts)
+        "reward_scenario_free": snap_reward,  # derived from T1-T0; the one to train on
         "counts": {
             "audit_events": sum(1 for _ in (ep_dir / "ice-audit.jsonl").open())
             if (ep_dir / "ice-audit.jsonl").exists() else 0,
