@@ -52,16 +52,21 @@ def wake(session_key: str, message: str, timeout: float = 900.0) -> AgentReply:
         j = json.loads(out[start:])
     except json.JSONDecodeError as e:
         return AgentReply(False, error=f"bad agent JSON: {e}", seconds=time.time() - t)
-    r = j.get("result") or {}
+    # OpenClaw 2026.10 `agent --json` returns {payloads, meta} at the top level; older NemoClaw
+    # builds wrapped that same object in {"result": ...}. Accept either shape.
+    r = j.get("result") or j
     meta = r.get("meta") or {}
     am = meta.get("agentMeta") or {}
     usage = am.get("usage") or {}
     text = "\n".join(pl.get("text", "") for pl in r.get("payloads") or [] if pl.get("text"))
     err = meta.get("error")
+    # Tool names moved too: agentMeta.terminalReceipt.successfulToolNames (old) -> meta.toolSummary.tools.
+    tool_names = ((am.get("terminalReceipt") or {}).get("successfulToolNames")
+                  or (meta.get("toolSummary") or {}).get("tools") or [])
     reply = AgentReply(
         ok=err is None and meta.get("stopReason") != "length",
         text=text,
-        tools=list((am.get("terminalReceipt") or {}).get("successfulToolNames") or []),
+        tools=list(tool_names),
         stop=meta.get("stopReason"),
         error=(err.get("message") if isinstance(err, dict) else err) or (
             "reply truncated at output token limit" if meta.get("stopReason") == "length" else None),

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -63,6 +64,20 @@ def _queries() -> Dict[str, JudgeQuery]:
     return qs
 
 
+def _force_escalate() -> bool:
+    """Dataset recording: send every change to investigation so an episode always has a trajectory.
+
+    `ICE_FORCE_ESCALATE=1` forces it for the whole process. `ICE_FORCE_ESCALATE_FLAG=<path>` forces it
+    only while that file exists, which is what the recorder uses: forcing during the pre-attack warmup
+    would spend the episode investigating reset noise (and OpenClaw serialises agent runs, so the real
+    attack would queue behind it).
+    """
+    if os.environ.get("ICE_FORCE_ESCALATE") == "1":
+        return True
+    flag = os.environ.get("ICE_FORCE_ESCALATE_FLAG")
+    return bool(flag) and os.path.exists(flag)
+
+
 def evaluate(entry: ChangeEntry) -> GateResult:
     res = GateResult(entry=entry)
     try:
@@ -85,6 +100,12 @@ def evaluate(entry: ChangeEntry) -> GateResult:
         res.reasons.append(f"verdict={res.verdict}")
     res.escalate = bool(res.reasons)
     res.priority = "high" if res.verdict != "normal" else ("low" if res.escalate else "none")
+    # Dataset recording (ICE_FORCE_ESCALATE=1): every change must reach investigation so each episode
+    # yields a trajectory. Kev still runs and its attributes/verdict are recorded above as data — it
+    # just no longer vetoes. Without this a low-scoring episode silently produces nothing to record.
+    if not res.escalate and _force_escalate():
+        res.escalate, res.priority = True, "low"
+        res.reasons.append("forced escalation (recording; Kev scored but did not veto)")
     return res
 
 

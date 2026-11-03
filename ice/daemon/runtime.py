@@ -23,6 +23,27 @@ from ice.daemon.safety.gate import SafetyGate, SafetyPolicy, configure_safety_ga
 
 log = logging.getLogger("ice.runtime")
 
+_AUTO_APPROVER = "auto-approver"
+
+
+class _AutoApproveStore(ApprovalStore):
+    """DEV ONLY (ICE_AUTO_APPROVE=1): approve each ASK as soon as the gate queues it.
+
+    There is no human and no Slack on this path, so it must never run in production. The policy
+    guard is deliberately kept: decide() calls approval_guard, so SafetyPolicy still refuses
+    critical-asset, out-of-scope and kill-switched commands exactly as it would for a human.
+    A refusal is logged and the request is left pending for the normal expiry sweep.
+    """
+
+    def put_nowait(self, request) -> None:  # noqa: ANN001 - matches SafetyGate's queue protocol
+        super().put_nowait(request)
+        try:
+            self.decide(request.request_id, True, _AUTO_APPROVER)
+        except Exception as e:  # noqa: BLE001 - a policy refusal must not break the gate
+            log.warning("auto-approve refused %r on %s: %s", request.command, request.target, e)
+            return
+        log.warning("AUTO-APPROVED (no human review) %r on %s", request.command, request.target)
+
 
 @dataclass
 class PendingAction:
@@ -80,14 +101,49 @@ class Runtime:
         sd.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.audit = AuditLog(sd / "audit.jsonl")
         self.pending = PendingRegistry(sd / "pending.json")
+        auto_approve = os.environ.get("ICE_AUTO_APPROVE") == "1"
+        # A critical asset normally only forces the ASK path (SafetyPolicy.deny_critical_assets
+        # defaults to False), which assumes a human is on the other end. Under ICE_AUTO_APPROVE
+        # nobody is, so ASK becomes a rubber stamp: deny critical assets outright instead. Observed
+        # for real on this box — `rm -f /root/.ssh/authorized_keys` was auto-approved as a mere ASK.
+        deny_critical = os.environ.get("ICE_DENY_CRITICAL_ASSETS", "1" if auto_approve else "0") == "1"
         policy = SafetyPolicy(
             authorized_targets=(self.conf.hostname,),
             bound_target=self.conf.hostname,          # host_exec always runs on this host
             critical_assets=self.conf.critical_assets,
+            deny_critical_assets=deny_critical,
         )
-        self.gate = SafetyGate(policy=policy, score_provider=judge_score_provider)
+        # Dataset recording (ICE_RECORD_MODE=1): Kev must not reject an action mid-trajectory. Without a
+        # score provider the gate cannot return its score-based DENYs ("Action lacks a legitimate basis",
+        # "Proposed effects exceed the stated scope"); actions take the ASK path instead and are
+        # auto-approved, so the episode runs to completion. Kev still scores the finished trajectory
+        # (ice.exercise.record). The deterministic critical-asset floor above deliberately stays on: it
+        # is static policy, not Kev's judgement, and it is what keeps the recording rig alive.
+        record_mode = os.environ.get("ICE_RECORD_MODE") == "1"
+        self.gate = SafetyGate(policy=policy,
+                               score_provider=None if record_mode else judge_score_provider)
+        if record_mode:
+            log.warning("ICE_RECORD_MODE=1: Kev is not a safety-gate veto; actions are auto-approved "
+                        "and executed for real. Critical assets are still denied.")
         self.approvals: Optional[ApprovalStore] = None
-        if self.conf.slack_ready:
+        if auto_approve and not self.conf.slack_ready:
+            # DEV ONLY: no Slack, no human. Every ASK is approved the moment the gate queues it, so the
+            # whole forward flow (propose -> ASK -> approve -> execute -> backward) runs unattended.
+            # SafetyPolicy still applies: decide() re-checks approval_guard, so a critical-asset or
+            # out-of-scope command is still refused. Pair this with ICE_DRY_RUN=1 — with dry run off,
+            # irreversible containment (e.g. rm -f authorized_keys) really runs, as root, on this host.
+            self.approvals = _AutoApproveStore(
+                sd / "approvals.sqlite3",
+                ApprovalPolicy(team_id="local", channel_id="local",
+                               allowed_user_ids=frozenset({_AUTO_APPROVER}),
+                               request_ttl_seconds=int(os.environ.get("ICE_APPROVAL_TTL", "600"))),
+                approval_guard=self.gate.current_policy_allows,
+            )
+            self.gate.approval_queue = self.approvals
+            log.warning("ICE_AUTO_APPROVE=1: every ASK is approved locally with no human review "
+                        "(dry_run=%s). Never use this outside a test box.",
+                        os.environ.get("ICE_DRY_RUN") == "1")
+        elif self.conf.slack_ready:
             self.approvals = ApprovalStore(
                 sd / "approvals.sqlite3",
                 ApprovalPolicy(team_id=self.conf.slack_team_id, channel_id=self.conf.slack_alert_channel,
