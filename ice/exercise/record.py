@@ -218,6 +218,64 @@ def verify_clean(scenario: Scenario) -> List[str]:
     return dirty
 
 
+def audit_counts(audit_path: Path) -> Dict[str, int]:
+    """How many of each event ICE recorded. The audit is written by the daemon, not by the recorder,
+    so it is the one account of the episode that the recorder's own bugs cannot shape."""
+    counts: Dict[str, int] = {}
+    try:
+        lines = audit_path.read_text().splitlines()
+    except OSError:
+        return counts
+    for ln in lines:
+        try:
+            e = json.loads(ln)
+        except json.JSONDecodeError:
+            continue
+        name = str(e.get("event"))
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def cross_check(ep_dir: Path, case: Optional[Dict[str, Any]],
+                score: Dict[str, Any]) -> List[str]:
+    """Does what the recorder collected agree with what ICE says it did?
+
+    Every failure in this rig so far has looked like a result rather than an error. A leftover
+    daemon blackholed the model and the episode read as "the agent did nothing". ssh dropped the
+    quoting on a directory listing and the episode read as "no case" and was graded a miss, while
+    ICE had detected the attack, run three commands and verified them. Neither was caught by
+    checking for errors, because there were none to check: the calls succeeded and answered a
+    different question.
+
+    The audit is the lever, because the daemon inside the VM writes it and nothing the recorder gets
+    wrong can change it. If it says cases were investigated, cases exist; if it says commands ran,
+    the machine changed. A disagreement means the recording is wrong, not that ICE failed.
+    """
+    counts = audit_counts(ep_dir / "ice-audit.jsonl")
+    collected = len(list(ep_dir.glob("case-*.json")))
+    problems: List[str] = []
+
+    investigated = counts.get("case.investigated", 0)
+    if investigated and not collected:
+        problems.append(f"the audit records {investigated} investigated case(s) and none were "
+                        f"collected: the bundle is missing the trajectory, not ICE the attack")
+    if investigated and case is None:
+        problems.append(f"the audit records {investigated} investigated case(s) but none matched "
+                        f"the scenario's markers, so this is not a detection miss")
+    executed = counts.get("host_exec.executed", 0)
+    if executed and score.get("changed_paths_total") == 0:
+        problems.append(f"the audit records {executed} executed command(s) and the snapshots show "
+                        f"no change at all: the images may not be this episode's")
+    if not counts:
+        problems.append("no audit was collected at all; nothing about this episode is verifiable")
+    if problems:
+        print("  !! the recording disagrees with the audit:")
+        for p_ in problems:
+            print(f"     - {p_}")
+        print(f"     audit says: {counts}")
+    return problems
+
+
 def _listed_paths(out: str) -> List[str]:
     """Absolute paths from an `ls` inside the VM, and nothing else.
 
@@ -566,6 +624,12 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         score = _score(ep_dir, case, images, ct.executed_commands(audit_path),
                        ct.refused_commands(audit_path))
 
+    inconsistent = cross_check(ep_dir, case, score)
+    if inconsistent:
+        # A recording that contradicts its own audit is not a result about ICE. Say so where the
+        # grade goes, so nothing downstream reads it as a detection failure.
+        det = {"detected": None, "miss": None, "reasons": inconsistent,
+               "inconclusive": "the recording disagrees with the audit"}
     meta = {
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
@@ -577,6 +641,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
                     ("ICE_RECORD_MODE", "ICE_FORCE_ESCALATE", "ICE_AUTO_APPROVE", "ICE_DRY_RUN",
                      "ICE_DENY_CRITICAL_ASSETS")},
         "grade": det,
+        "audit_counts": audit_counts(ep_dir / "ice-audit.jsonl"),
         "kev_score": kev,
         # One reward, derived from two snapshots of this episode's own machine. The scenario-based
         # one that used to sit here is gone: it graded against declarations, and its deterministic
