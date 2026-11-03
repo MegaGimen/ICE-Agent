@@ -318,6 +318,15 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         (ep_dir / "agent-trajectory.json").write_text(json.dumps(trajectory, ensure_ascii=False, indent=1))
     det = grade(scenario, case)
     kev = kev_score(scenario, case, trajectory) if case else {"skipped": "no case"}
+    # Environment facts first, then an agent's judgement of them, then the scalar reward. This runs
+    # before the scenario cleanup, so the diff is the machine as the agent actually left it.
+    from ice.exercise import evaluate
+    post = evaluate.post_state(scenario, BASELINE_TAR)
+    judgement = evaluate.judge(scenario, case, trajectory, post)
+    rwd = evaluate.reward(judgement, post)
+    (ep_dir / "post-state.json").write_text(json.dumps(post, ensure_ascii=False, indent=1))
+    print(f"  post-state: {post['counts']} markers_clear={post['markers_clear']}")
+    print(f"  reward: {rwd}")
     meta = {
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
@@ -330,6 +339,10 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
                      "ICE_DENY_CRITICAL_ASSETS")},
         "grade": det,
         "kev_score": kev,
+        "post_state_counts": post["counts"],
+        "markers_clear": post["markers_clear"],
+        "agent_judgement": judgement,
+        "reward": rwd,
         "counts": {
             "audit_events": sum(1 for _ in (ep_dir / "ice-audit.jsonl").open())
             if (ep_dir / "ice-audit.jsonl").exists() else 0,

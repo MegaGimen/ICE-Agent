@@ -33,11 +33,31 @@ def _start_mcp(rt: Runtime) -> None:
     log.info("MCP server on http://%s:%s/mcp", rt.conf.mcp_host, rt.conf.mcp_port)
 
 
-HEALTH = {
-    "vLLM": "http://localhost:8000/health",
-    "Kev": "http://localhost:8010/v1/models",
-    "embedding service": "http://127.0.0.1:8020/health",
-}
+# Backends that must answer before the orchestrator starts a cycle. A hosted backend has no local
+# endpoint to poll, so every check is configurable and an empty value drops it:
+#   ICE_MAIN_MODEL_HEALTH=""                     # agent model is a hosted API; nothing to poll
+#   KEV_URL=https://api.typesafe.ai              # Kev check follows KEV_URL (judge.py uses the same)
+#   ICE_HEALTH_CHECKS="a=url,b=url"              # replace the whole set
+# Without this the daemon waits forever on 127.0.0.1:8000/8010 when the models are not local.
+EMBED_CHECK = "embedding service"
+
+
+def _health_targets() -> dict:
+    spec = os.environ.get("ICE_HEALTH_CHECKS")
+    if spec is not None:
+        out = {}
+        for item in spec.split(","):
+            name, _, url = item.partition("=")
+            if name.strip() and url.strip():
+                out[name.strip()] = url.strip()
+        return out
+    kev = os.environ.get("KEV_URL", "http://127.0.0.1:8010").rstrip("/")
+    targets = {
+        "main model": os.environ.get("ICE_MAIN_MODEL_HEALTH", "http://localhost:8000/health"),
+        "Kev": os.environ.get("ICE_KEV_HEALTH", kev + "/v1/models"),
+        EMBED_CHECK: os.environ.get("ICE_EMBED_HEALTH", "http://127.0.0.1:8020/health"),
+    }
+    return {name: url for name, url in targets.items() if url}
 
 
 def _up(url: str) -> bool:
@@ -59,7 +79,7 @@ def _mcp_proxy_up() -> bool:
 
 
 def _health() -> dict:
-    h = {name: _up(url) for name, url in HEALTH.items()}
+    h = {name: _up(url) for name, url in _health_targets().items()}
     h["MCP proxy"] = _mcp_proxy_up()
     return h
 
@@ -70,12 +90,16 @@ def _wait_for_models(stop: threading.Event, timeout: float = 1800) -> bool:
     import time
     from ice.daemon.notify import status
     t0, told = time.time(), False
+    # The decision/agent backends, i.e. every configured check except the embedding service (whose
+    # absence only degrades retrieval). With no model checks configured there is nothing to wait for.
+    required = [name for name in _health_targets() if name != EMBED_CHECK]
     while not stop.is_set():
         h = _health()
-        if h["vLLM"] and h["Kev"]:
+        if all(h.get(name) for name in required):
             return True
         if not told:
-            status.post("daemon", "waiting", "models not ready: " + ", ".join(k for k in ("vLLM", "Kev") if not h[k]))
+            status.post("daemon", "waiting",
+                        "models not ready: " + ", ".join(k for k in required if not h.get(k)))
             told = True
         if time.time() - t0 > timeout:
             status.post("daemon", "failed", f"models still not ready after {timeout:.0f}s")
