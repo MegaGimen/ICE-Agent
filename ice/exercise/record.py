@@ -113,14 +113,20 @@ SCRATCH_DEPTH = 3
 def write_scratch_manifest() -> int:
     """List the volatile roots of the clean machine. Reset deletes whatever is not in here, and
     verification reads it as existence evidence for paths no other source records."""
+    from ice.exercise.command_trace import Scratch
     RIG.mkdir(parents=True, exist_ok=True)
+    roots = ["/" + d for d in SCRATCH]
+    n = 0
     with SCRATCH_MANIFEST.open("w") as fh:
+        # The listing states its own coverage, so a reader never has to be told and can never be
+        # told something stale. Widening SCRATCH without rewriting the file leaves the file honest.
+        fh.write(Scratch.header(roots, SCRATCH_DEPTH) + "\n")
         for d in SCRATCH:
             cmd = f"find /{d} -mindepth 1 -maxdepth {SCRATCH_DEPTH} 2>/dev/null"
             for line in sh(cmd).stdout.splitlines():
                 fh.write(line + "\n")
-    n = sum(1 for _ in SCRATCH_MANIFEST.open())
-    print(f">>> scratch manifest {SCRATCH_MANIFEST}: {n} entries over {SCRATCH}")
+                n += 1
+    print(f">>> scratch manifest {SCRATCH_MANIFEST}: {n} entries over {roots}")
     return n
 
 
@@ -134,8 +140,14 @@ def snapshot() -> None:
           f"{len(present)} paths, scratch manifest {n} entries")
 
 
+def ct_scratch():
+    """The manifest as verification reads it: one parser, so reset and scoring cannot disagree."""
+    from ice.exercise.command_trace import Scratch
+    return Scratch(SCRATCH_MANIFEST)
+
+
 def _restore_scratch() -> None:
-    keep = {l.strip() for l in SCRATCH_MANIFEST.open()} if SCRATCH_MANIFEST.exists() else set()
+    keep = ct_scratch().paths
     # A stale manifest would be read as proof that a path existed on the clean machine, so an entry
     # that is simply gone turns into phantom damage. 20 of this box's 573 entries carry a
     # boot-specific id (systemd-private-<random>), which is exactly what a reboot invalidates.
@@ -149,7 +161,11 @@ def _restore_scratch() -> None:
                 sh(f"rm -rf -- {json.dumps(line.strip())}")
 
 
-DAEMON_PORTS = (8083, 8088)   # MCP server, dashboard
+def _daemon_ports() -> tuple:
+    """The sockets the daemon binds, read from the same env the daemon reads. Hardcoding 8088 here
+    meant a non-default ICE_DASHBOARD_PORT left stop_daemon() waiting on a port nobody held."""
+    return (int(os.environ.get("ICE_MCP_PORT", "8083")),
+            int(os.environ.get("ICE_DASHBOARD_PORT", "8088")))
 
 
 def stop_daemon() -> None:
@@ -159,7 +175,7 @@ def stop_daemon() -> None:
     # Wait for the sockets to actually be released. A fixed sleep is not enough: the next daemon
     # then dies with "OSError: [Errno 98] Address already in use" and the episode records nothing.
     for _ in range(30):
-        busy = [p for p in DAEMON_PORTS
+        busy = [p for p in _daemon_ports()
                 if sh(f"ss -ltn | grep -q ':{p} '").returncode == 0]
         if not busy:
             return
@@ -181,7 +197,7 @@ def start_daemon() -> None:
     print("  [start-daemon] launched")
     for _ in range(60):
         time.sleep(2)
-        if sh("ss -ltn | grep -q :8083").returncode == 0:
+        if sh(f"ss -ltn | grep -q ':{_daemon_ports()[0]} '").returncode == 0:
             print("  [start-daemon] MCP up")
             return
     raise RuntimeError("daemon did not come up")
@@ -349,7 +365,29 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "scope_missed": scope_missed, "miss": not verdict_ok, "reasons": reasons}
 
 
-def _lens_paths(snapshot: Dict[str, Any]) -> List[str]:
+def _lens_drift(lens: List[str], *snapshots: Dict[str, Any]) -> List[str]:
+    """Paths a snapshot really collected that the declared lens fails to match.
+
+    `OSQUERY_FILE_ROOTS` is the one part of the lens that cannot be derived -- osquery's cron and
+    sudoers tables carry their paths inside their own implementation, not in a query we can read.
+    So it is checked instead of trusted: anything collected from a root we forgot to declare shows
+    up here, which is how the next /etc/cron.d-shaped blind spot gets noticed rather than silently
+    scoring as out-of-lens.
+    """
+    from ice.exercise.command_trace import in_lens
+    declared = [e for e in lens if "*" in e or e.endswith("/")]
+    out = set()
+    for snap in snapshots:
+        stable = ((snap or {}).get("data") or {}).get("stable") or {}
+        for table in ("cron", "sudoers", "autostart_files", "critical_files"):
+            for key in (stable.get(table) or {}):
+                q = str(key).split("#", 1)[0]
+                if q.startswith("/") and not in_lens(q, lens) and not in_lens(q, declared):
+                    out.add(q)
+    return sorted(out)
+
+
+def _lens_paths(*snapshots: Dict[str, Any]) -> List[str]:
     """What ICE's eyes cover, so damage can be labelled in- or out-of-lens.
 
     The authoritative part is the collector's own scan roots (`snapshot.lens_globs()`): the declared
@@ -360,14 +398,15 @@ def _lens_paths(snapshot: Dict[str, Any]) -> List[str]:
     """
     from ice.daemon.perception.snapshot import lens_globs
     paths: List[str] = list(lens_globs())
-    stable = ((snapshot or {}).get("data") or {}).get("stable") or {}
-    for table, rows in stable.items():
-        if not isinstance(rows, dict):
-            continue
-        for key in rows:
-            p = str(key).split("#", 1)[0]       # cron/sudoers keys are "<path>#<content hash>"
-            if p.startswith("/"):
-                paths.append(p)
+    for snapshot in snapshots:
+        stable = ((snapshot or {}).get("data") or {}).get("stable") or {}
+        for table, rows in stable.items():
+            if not isinstance(rows, dict):
+                continue
+            for key in rows:
+                p = str(key).split("#", 1)[0]   # cron/sudoers keys are "<path>#<content hash>"
+                if p.startswith("/"):
+                    paths.append(p)
     return sorted(set(paths))
 
 
@@ -411,16 +450,20 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     from ice.exercise import command_trace as ct
     audit = ep_dir / "ice-audit.jsonl"
     commands, refused = ct.executed_commands(audit), ct.refused_commands(audit)
-    lens = _lens_paths(snaps["t0"])
+    lens = _lens_paths(snaps["t0"], snaps["t1"], snaps["t2"])
+    drift = _lens_drift(lens, snaps["t0"], snaps["t1"], snaps["t2"])
+    if drift:
+        print(f"  !! collected from undeclared roots (lens_globs needs widening): {drift[:6]}")
     judgement = evaluate.judge_commands(d, commands, refused, trajectory)
     # The scratch manifest is the only record of /tmp and /var/tmp -- they are in neither the
     # tarball nor any osquery table, so without it a deletion there cannot be ruled on either way.
-    scratch = ct.Scratch(SCRATCH_MANIFEST, roots=["/" + d for d in SCRATCH], depth=SCRATCH_DEPTH)
+    scratch = ct_scratch()
     checked = ct.verify_paths(judgement.get("paths_to_check") or [], BASELINE_TAR, lens,
                               t0=snaps["t0"], t1=snaps["t1"], scratch=scratch)
     trace = {"executed": commands, "refused": refused, "judgement": judgement,
              "verified": checked, "snapshot_lens_size": len(lens),
-             "scratch_manifest_size": len(scratch.paths)}
+             "scratch_manifest_size": len(scratch.paths),
+             "scratch_roots": list(scratch.roots), "lens_drift": drift}
     (ep_dir / "command-trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1))
 
     out = sr.reward(d, judgement)

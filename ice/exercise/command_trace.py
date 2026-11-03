@@ -22,6 +22,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import re
 import json
 import tarfile
 from pathlib import Path
@@ -135,16 +136,42 @@ class Scratch:
     rather than silently assumed absent from the baseline.
     """
 
+    HEADER = "# scratch-manifest roots=%s depth=%d"
+
+    @classmethod
+    def header(cls, roots: Iterable[str], depth: int) -> str:
+        return cls.HEADER % (",".join(roots), depth)
+
     def __init__(self, manifest: Optional[Path] = None,
-                 roots: Iterable[str] = ("/tmp", "/var/tmp"), depth: int = 3) -> None:
-        self.roots = tuple(r.rstrip("/") for r in roots)
-        self.depth = depth
+                 roots: Optional[Iterable[str]] = None, depth: Optional[int] = None) -> None:
+        """Coverage comes from the manifest's own header, not from the caller.
+
+        It used to be passed in, with defaults here as a second copy of a list that lives in the
+        recorder -- so widening the recorded roots left this copy narrow and a path under the new
+        root silently went back to being unverifiable. The file now states what it covers, and when
+        it does not say, nothing is ruled on: `covers()` is false everywhere and every absence
+        reports as unknown. That is the safe direction to fail in.
+        """
+        self.roots: tuple = tuple(r.rstrip("/") for r in roots) if roots else ()
+        self.depth = depth or 0
         self.paths: set = set()
-        if manifest:
-            try:
-                self.paths = {l.strip() for l in Path(manifest).read_text().splitlines() if l.strip()}
-            except OSError:
-                pass
+        if not manifest:
+            return
+        try:
+            lines = Path(manifest).read_text().splitlines()
+        except OSError:
+            return
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                m = re.match(r"#\s*scratch-manifest roots=(\S*) depth=(\d+)", line)
+                if m and not roots:
+                    self.roots = tuple(r.rstrip("/") for r in m.group(1).split(",") if r)
+                    self.depth = int(m.group(2))
+                continue
+            self.paths.add(line)
 
     def _alias(self, path: str) -> str:
         """The path the manifest would have listed. /var/spool/mail is a symlink to /var/mail, and
@@ -156,7 +183,7 @@ class Scratch:
             return path
 
     def covers(self, path: str) -> bool:
-        if not self.paths:
+        if not self.paths or not self.roots or not self.depth:
             return False
         for candidate in (path, self._alias(path)):
             for r in self.roots:

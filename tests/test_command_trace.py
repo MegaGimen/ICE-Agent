@@ -102,6 +102,36 @@ def test_scratch_manifest_rules_on_tmp(tmp_path: Path) -> None:
     assert not sc.covers("/etc/passwd")
 
 
+def test_manifest_states_its_own_coverage(tmp_path: Path) -> None:
+    """Coverage must travel with the listing, and a listing that does not say must rule on nothing.
+
+    The roots used to be a parameter with a default copy of the recorder's list, so widening the
+    recorded roots left the copy narrow and paths under the new root quietly went back to
+    unverifiable -- the same bug class this whole check exists to catch.
+    """
+    body = "\n".join([str(tmp_path / "tmp" / "kept")]) + "\n"
+    (tmp_path / "tmp").mkdir()
+    tar = tmp_path / "empty.tar.gz"
+    with tarfile.open(tar, "w:gz"):
+        pass
+
+    with_header = tmp_path / "with-header.txt"
+    with_header.write_text(ct.Scratch.header([str(tmp_path / "tmp")], 3) + "\n" + body)
+    sc = ct.Scratch(with_header)
+    assert sc.roots == (str(tmp_path / "tmp"),) and sc.depth == 3
+    assert sc.paths == {str(tmp_path / "tmp" / "kept")}      # the header line is not a path
+    assert sc.covers(str(tmp_path / "tmp" / "anything"))
+
+    # No header, nothing passed: rule on nothing rather than guess a root.
+    bare = tmp_path / "bare.txt"
+    bare.write_text(body)
+    blind = ct.Scratch(bare)
+    assert blind.roots == () and not blind.covers(str(tmp_path / "tmp" / "anything"))
+    gone = str(tmp_path / "tmp" / "vanished")
+    assert ct.verify_paths([gone], tar, scratch=blind)["results"][gone]["status"] \
+        == "absent_unverifiable"
+
+
 def test_symlinked_scratch_root_answers_consistently(tmp_path: Path) -> None:
     """/var/spool/mail is a symlink to /var/mail, and `find` does not descend a symlinked root.
 
@@ -144,6 +174,8 @@ if __name__ == "__main__":
         test_verify_paths_statuses(Path(d))
     with tempfile.TemporaryDirectory() as d:
         test_scratch_manifest_rules_on_tmp(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_manifest_states_its_own_coverage(Path(d))
     with tempfile.TemporaryDirectory() as d:
         test_symlinked_scratch_root_answers_consistently(Path(d))
     test_lens_matches_directory_scans()
