@@ -830,7 +830,33 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         image.release()
         vm.shutdown(live)
         if os.environ.get("ICE_KEEP_LIVE_OVERLAY") != "1":
-            vm.drop(live)       # the two snapshots are the evidence; the working disk is not
+            vm.drop(live)       # the snapshots are the evidence; the working disk is not
+        prune_disks()
+
+
+def prune_disks() -> None:
+    """Keep the newest few episodes' disks and drop the rest.
+
+    Safe only because evidence.json carries the diffs the judge is given, so an episode whose disks
+    are gone can still be re-judged. Without that this would be the osquery pruning mistake again:
+    evidence deleted out from under bundles that pointed at it.
+    """
+    from ice.exercise import vm
+    keep = int(os.environ.get("ICE_KEEP_EPISODE_DISKS", "5"))
+    groups: Dict[str, List[str]] = {}
+    for label in vm.overlays():
+        if label == vm.BASE_LABEL:
+            continue
+        groups.setdefault(label.rsplit("-", 1)[0], []).append(label)
+    order = sorted(groups, key=lambda g: max(vm.taken_at(l) for l in groups[g]), reverse=True)
+    dropped = 0
+    for stem in order[keep:]:
+        for label in groups[stem]:
+            vm.drop(label)
+            dropped += 1
+    if dropped:
+        print(f"  [prune] dropped {dropped} disk(s) from {len(order) - keep} older episode(s); "
+              f"their bundles keep evidence.json and stay re-judgeable")
 
 
 def main() -> None:
