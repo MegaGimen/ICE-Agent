@@ -40,6 +40,9 @@ from ice.daemon.contracts import JudgeKind, JudgeQuery, JudgeResult
 
 DEFAULT_URL = os.environ.get("KEV_URL", "http://127.0.0.1:8010")
 DEFAULT_TIMEOUT = float(os.environ.get("KEV_TIMEOUT", "30"))
+# Which System One model to ask for. "kev-latest" is the locally served Kev; TypeSafe's hosted
+# endpoint (KEV_URL=https://api.typesafe.ai) serves "jev-latest" instead. Same API either way.
+DEFAULT_MODEL = os.environ.get("KEV_MODEL", "kev-latest")
 
 
 class KevError(RuntimeError):
@@ -50,10 +53,11 @@ class KevClient:
     """最薄的 Kev HTTP 客户端。judge() / judge_batch() 是主入口。"""
 
     def __init__(self, url: str = DEFAULT_URL, timeout: float = DEFAULT_TIMEOUT,
-                 api_key: Optional[str] = None):
+                 api_key: Optional[str] = None, model: str = DEFAULT_MODEL):
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.api_key = api_key or os.environ.get("KEV_API_KEY")
+        self.model = model
 
     # -- 底层 --------------------------------------------------------------
     def _post(self, path: str, body: dict) -> dict:
@@ -150,7 +154,7 @@ class KevClient:
             return {}
         body = {
             "state": context,
-            "model": "kev-latest",
+            "model": self.model,
             "questions": {qid: self._question_payload(q) for qid, q in queries.items()},
         }
         resp = self._post("/v1/systemone", body)
