@@ -32,12 +32,19 @@ from typing import Any, Dict, List, Optional, Tuple
 Artifact = Tuple[str, str]        # (table, identity key), e.g. ("stable.cron", "/etc/cron.d/x#ab12")
 
 
-def index(snapshot: Dict[str, Any]) -> Dict[Artifact, Any]:
+# Only durable state is scored. `flow` (processes, connections) is a momentary sample: kernel
+# worker threads come and go between two snapshots and showed up as attack footprint and as
+# collateral damage, and the rig's own node/python processes showed up as remediation side-effects.
+# A backdoor that listens is still caught, because listening_ports lives in `stable`.
+SCORED_GROUPS = ("stable",)
+
+
+def index(snapshot: Dict[str, Any], groups: Tuple[str, ...] = SCORED_GROUPS) -> Dict[Artifact, Any]:
     """{(table, key): row} for every artifact in a snapshot file's `data` section."""
     out: Dict[Artifact, Any] = {}
     data = (snapshot or {}).get("data") or {}
     for group, tables in data.items():
-        if not isinstance(tables, dict):
+        if not isinstance(tables, dict) or (groups and group not in groups):
             continue
         for table, rows in tables.items():
             name = f"{group}.{table}"

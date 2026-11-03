@@ -330,7 +330,7 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     from ice.exercise import evaluate, snapshot_reward as sr
     ice = case.get("_ice") or {}
     snaps: Dict[str, Any] = {}
-    for label in ("t0", "t1", "t2"):
+    for label in ("t0", "t1"):
         ts = ice.get(label)
         if ts is None:
             print(f"  [snapshot] {label.upper()} pointer absent in the case")
@@ -342,6 +342,18 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
         dst = ep_dir / f"snapshot-{label.upper()}.json"
         shutil.copy2(hits[0], dst)
         snaps[label] = sr.load(dst)
+    # T2 is deliberately NOT the case's own t2 pointer. Approved actions execute one after another
+    # over tens of seconds, and ICE records t2 before the last of them has run -- scoring against it
+    # marked `rm -f /etc/cron.d/persistevil` as "not cleared" in an episode where it ran with rc=0.
+    # Export happens after the settle window, so the newest snapshot on disk is the honest T2.
+    newest = sorted(glob.glob(str(STATE / "snapshots" / "*.json")),
+                    key=lambda p: float(Path(p).stem), reverse=True)
+    if newest:
+        dst = ep_dir / "snapshot-T2.json"
+        shutil.copy2(newest[0], dst)
+        snaps["t2"] = sr.load(dst)
+        print(f"  [snapshot] T2 = newest after settle ({Path(newest[0]).stem}), "
+              f"case pointer was {ice.get('t2')}")
     if len(snaps) < 3:
         return {"error": f"need T0/T1/T2, got {sorted(snaps)}"}
     d = sr.diff(snaps["t0"], snaps["t1"], snaps["t2"])
