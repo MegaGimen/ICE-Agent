@@ -184,30 +184,6 @@ TABLES: List[Table] = [
 ]
 TABLES_BY_NAME = {t.name: t for t in TABLES}
 
-# Filesystem roots the stable tables read, as glob patterns. This is what ICE's eyes cover, so an
-# episode scorer can tell "watched and unchanged" from "never watched". It is deliberately derived
-# from the collector and not from any description of the host: the queries above supply their own
-# path literals, and the two tables whose paths live inside osquery's implementation are named here.
-OSQUERY_FILE_ROOTS: Tuple[str, ...] = (
-    "/etc/crontab", "/etc/cron.d/*", "/etc/cron.hourly/*", "/etc/cron.daily/*",
-    "/etc/cron.weekly/*", "/etc/cron.monthly/*", "/var/spool/cron/*", "/var/spool/cron/crontabs/*",
-    "/etc/sudoers", "/etc/sudoers.d/*",
-)
-
-
-def lens_globs() -> List[str]:
-    """Every path pattern the stable tables watch: exact critical files, the LIKE patterns the
-    autostart query spells out, and osquery's own cron/sudoers roots."""
-    out = list(CRITICAL_FILES) + list(OSQUERY_FILE_ROOTS)
-    for t in TABLES:
-        if t.kind != "stable":
-            continue
-        for pat in re.findall(r"LIKE\s+'([^']+)'", t.sql):
-            if pat.startswith("/"):        # the autostart query also LIKEs on unit names, not paths
-                out.append(re.sub(r"%+", "*", pat))
-    return sorted(set(out))
-
-
 @dataclass
 class Snapshot:
     ts: float

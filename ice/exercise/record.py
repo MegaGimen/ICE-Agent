@@ -62,14 +62,12 @@ BASELINE_PATHS = [
     "etc/systemd/system", "etc/ld.so.preload", "etc/hosts.allow", "etc/hosts.deny",
     "root/.ssh", "home/iceagent/.ssh",
 ]
-# Docker bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf, and tar cannot replace a bind
-# mount ("Cannot open: File exists"). They are skipped automatically by _snapshot_paths().
-# Volatile roots: not worth restoring byte-for-byte, but worth *listing*, so a deletion under them
-# can be ruled on. /var/mail and /var/spool/mail are here because `userdel -r` deletes a user's mail
-# spool, and nothing else records that those paths existed.
-SCRATCH = ["tmp", "var/tmp", "var/mail", "var/spool/mail"]
+
 BASELINE_TAR = RIG / "baseline.tar.gz"
-SCRATCH_MANIFEST = RIG / "scratch-manifest.txt"
+# The healthy machine, as a whole-filesystem snapshot. This is what reset restores and what damage
+# is measured against; the 19-path tarball below survives only because evaluate.post_state still
+# reads it, and is rebuilt from this image so the two cannot drift apart.
+IMAGE_BASELINE = os.environ.get("ICE_IMAGE_BASELINE", "S0")
 INVESTIGATE_TIMEOUT = float(os.environ.get("ICE_RECORD_TIMEOUT", "900"))
 SETTLE_SECONDS = float(os.environ.get("ICE_RECORD_SETTLE", "60"))
 
@@ -86,79 +84,23 @@ def sh(cmd: str, label: str = "", check: bool = False) -> subprocess.CompletedPr
 
 # ---------------------------------------------------------------- baseline / reset
 
-def _mount_points() -> set:
-    try:
-        return {l.split()[1] for l in Path("/proc/mounts").read_text().splitlines() if len(l.split()) > 1}
-    except OSError:
-        return set()
-
-
-def _snapshot_paths() -> List[str]:
-    """Paths that exist and are not themselves bind mounts (tar cannot replace a bind mount)."""
-    mounts = _mount_points()
-    out = []
-    for p in BASELINE_PATHS:
-        if not Path("/", p).exists():
-            continue
-        if "/" + p in mounts:
-            print(f"  [snapshot] skipping bind mount /{p}")
-            continue
-        out.append(p)
-    return out
-
-
-SCRATCH_DEPTH = 3
-
-
-def write_scratch_manifest() -> int:
-    """List the volatile roots of the clean machine. Reset deletes whatever is not in here, and
-    verification reads it as existence evidence for paths no other source records."""
-    from ice.exercise.command_trace import Scratch
-    RIG.mkdir(parents=True, exist_ok=True)
-    roots = ["/" + d for d in SCRATCH]
-    n = 0
-    with SCRATCH_MANIFEST.open("w") as fh:
-        # The listing states its own coverage, so a reader never has to be told and can never be
-        # told something stale. Widening SCRATCH without rewriting the file leaves the file honest.
-        fh.write(Scratch.header(roots, SCRATCH_DEPTH) + "\n")
-        for d in SCRATCH:
-            cmd = f"find /{d} -mindepth 1 -maxdepth {SCRATCH_DEPTH} 2>/dev/null"
-            for line in sh(cmd).stdout.splitlines():
-                fh.write(line + "\n")
-                n += 1
-    print(f">>> scratch manifest {SCRATCH_MANIFEST}: {n} entries over {roots}")
-    return n
-
-
 def snapshot() -> None:
-    """Capture the pristine machine. Run once, on a box with no scenario residue."""
+    """Rebuild the 19-path tarball from the baseline image.
+
+    The image is what reset restores and what damage is measured against. This tarball survives for
+    one reason: evaluate.post_state still reads it. Building it out of the image rather than off the
+    live machine keeps that one consumer from drifting away from the real baseline.
+    """
+    from ice.exercise import image
+    src = image.SNAP_ROOT / IMAGE_BASELINE
+    if not src.is_dir():
+        raise SystemExit(f"no baseline image at {src}; take it first:\n"
+                         f"    python -m ice.exercise.image take {IMAGE_BASELINE}")
     RIG.mkdir(parents=True, exist_ok=True)
-    present = _snapshot_paths()
-    sh(f"tar -czf {BASELINE_TAR} -C / " + " ".join(present), "snapshot", check=True)
-    n = write_scratch_manifest()
-    print(f">>> baseline {BASELINE_TAR} ({BASELINE_TAR.stat().st_size} bytes), "
-          f"{len(present)} paths, scratch manifest {n} entries")
-
-
-def ct_scratch():
-    """The manifest as verification reads it: one parser, so reset and scoring cannot disagree."""
-    from ice.exercise.command_trace import Scratch
-    return Scratch(SCRATCH_MANIFEST)
-
-
-def _restore_scratch() -> None:
-    keep = ct_scratch().paths
-    # A stale manifest would be read as proof that a path existed on the clean machine, so an entry
-    # that is simply gone turns into phantom damage. 20 of this box's 573 entries carry a
-    # boot-specific id (systemd-private-<random>), which is exactly what a reboot invalidates.
-    stale = [k for k in keep if not Path(k).exists()]
-    if stale:
-        print(f"  [scratch] {len(stale)} manifest entries no longer exist "
-              f"(e.g. {stale[0]}); refresh with `record.py manifest` or they read as damage")
-    for d in SCRATCH:
-        for line in sh(f"find /{d} -mindepth 1 -maxdepth {SCRATCH_DEPTH} 2>/dev/null").stdout.splitlines():
-            if line.strip() and line.strip() not in keep:
-                sh(f"rm -rf -- {json.dumps(line.strip())}")
+    present = [rel for rel in BASELINE_PATHS if (src / rel).exists()]
+    sh(f"tar -czf {BASELINE_TAR} -C {src} " + " ".join(present), "tar-from-image", check=True)
+    print(f">>> {BASELINE_TAR} ({BASELINE_TAR.stat().st_size} bytes) from image "
+          f"{IMAGE_BASELINE}, {len(present)}/{len(BASELINE_PATHS)} paths present")
 
 
 def _daemon_ports() -> tuple:
@@ -204,13 +146,19 @@ def start_daemon() -> None:
 
 
 def reset(episode: str) -> None:
-    """Put the machine, ICE and the agent back to the pristine baseline."""
+    """Put the machine, ICE and the agent back to the pristine baseline.
+
+    The whole filesystem goes back, not a list of paths. That list was the reason /etc/environment
+    stayed deleted across every episode after one damage test: osquery saw it go, but it was not
+    among the 19 paths the tarball held, so no reset could put it back.
+    """
+    from ice.exercise import image
     print(f"=== reset for {episode} ===")
-    if not BASELINE_TAR.exists():
-        raise RuntimeError(f"no baseline at {BASELINE_TAR}; run `record.py snapshot` on a clean box first")
+    if not (image.SNAP_ROOT / IMAGE_BASELINE).is_dir():
+        raise RuntimeError(f"no baseline image {IMAGE_BASELINE!r} under {image.SNAP_ROOT}; "
+                           f"run `python -m ice.exercise.image take {IMAGE_BASELINE}` on a clean box")
     stop_daemon()
-    sh(f"tar -xzf {BASELINE_TAR} -C / --overwrite", "restore", check=True)
-    _restore_scratch()
+    image.restore(IMAGE_BASELINE)
     if STATE.exists():
         shutil.rmtree(STATE)
     STATE.mkdir(parents=True, exist_ok=True)
@@ -365,54 +313,9 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "scope_missed": scope_missed, "miss": not verdict_ok, "reasons": reasons}
 
 
-def _lens_drift(lens: List[str], *snapshots: Dict[str, Any]) -> List[str]:
-    """Paths a snapshot really collected that the declared lens fails to match.
-
-    `OSQUERY_FILE_ROOTS` is the one part of the lens that cannot be derived -- osquery's cron and
-    sudoers tables carry their paths inside their own implementation, not in a query we can read.
-    So it is checked instead of trusted: anything collected from a root we forgot to declare shows
-    up here, which is how the next /etc/cron.d-shaped blind spot gets noticed rather than silently
-    scoring as out-of-lens.
-    """
-    from ice.exercise.command_trace import in_lens
-    declared = [e for e in lens if "*" in e or e.endswith("/")]
-    out = set()
-    for snap in snapshots:
-        stable = ((snap or {}).get("data") or {}).get("stable") or {}
-        for table in ("cron", "sudoers", "autostart_files", "critical_files"):
-            for key in (stable.get(table) or {}):
-                q = str(key).split("#", 1)[0]
-                if q.startswith("/") and not in_lens(q, lens) and not in_lens(q, declared):
-                    out.add(q)
-    return sorted(out)
-
-
-def _lens_paths(*snapshots: Dict[str, Any]) -> List[str]:
-    """What ICE's eyes cover, so damage can be labelled in- or out-of-lens.
-
-    The authoritative part is the collector's own scan roots (`snapshot.lens_globs()`): the declared
-    critical files plus the directory globs its queries read. That is a property of the sensor, not a
-    description of this host, and unlike enumerating a snapshot's rows it still covers a directory
-    the attack was the first to put a file in. The rows of the given snapshot are added on top, since
-    osquery resolves some paths (home directories, extra cron roots) that no pattern spells out.
-    """
-    from ice.daemon.perception.snapshot import lens_globs
-    paths: List[str] = list(lens_globs())
-    for snapshot in snapshots:
-        stable = ((snapshot or {}).get("data") or {}).get("stable") or {}
-        for table, rows in stable.items():
-            if not isinstance(rows, dict):
-                continue
-            for key in rows:
-                p = str(key).split("#", 1)[0]   # cron/sudoers keys are "<path>#<content hash>"
-                if p.startswith("/"):
-                    paths.append(p)
-    return sorted(set(paths))
-
-
 def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """Copy the case's T0/T1/T2 snapshots into the bundle and score them without the scenario."""
-    from ice.exercise import evaluate, snapshot_reward as sr
+    from ice.exercise import snapshot_reward as sr
     ice = case.get("_ice") or {}
     snaps: Dict[str, Any] = {}
     for label in ("t0", "t1"):
@@ -444,48 +347,58 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     d = sr.diff(snaps["t0"], snaps["t1"], snaps["t2"])
     (ep_dir / "snapshot-diff.json").write_text(json.dumps(d, ensure_ascii=False, indent=1))
 
-    # The commands are facts from the audit, and they have no lens limit: `rm -f /var/log/foo` is
-    # recorded even though /var/log is in no snapshot table. A judge turns them into paths to look
-    # at, then every path it names is checked on disk. Pointers from the model, facts from the host.
-    from ice.exercise import command_trace as ct
-    audit = ep_dir / "ice-audit.jsonl"
-    commands, refused = ct.executed_commands(audit), ct.refused_commands(audit)
-    lens = _lens_paths(snaps["t0"], snaps["t1"], snaps["t2"])
-    drift = _lens_drift(lens, snaps["t0"], snaps["t1"], snaps["t2"])
-    if drift:
-        print(f"  !! collected from undeclared roots (lens_globs needs widening): {drift[:6]}")
-    judgement = evaluate.judge_commands(d, commands, refused, trajectory)
-    # The scratch manifest is the only record of /tmp and /var/tmp -- they are in neither the
-    # tarball nor any osquery table, so without it a deletion there cannot be ruled on either way.
-    scratch = ct_scratch()
-    checked = ct.verify_paths(judgement.get("paths_to_check") or [], BASELINE_TAR, lens,
-                              t0=snaps["t0"], t1=snaps["t1"], scratch=scratch)
-    trace = {"executed": commands, "refused": refused, "judgement": judgement,
-             "verified": checked, "snapshot_lens_size": len(lens),
-             "scratch_manifest_size": len(scratch.paths),
-             "scratch_roots": list(scratch.roots), "lens_drift": drift}
-    (ep_dir / "command-trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1))
-
-    out = sr.reward(d, judgement)
-    out["commands_run"] = len(commands)
-    out["paths_checked"] = checked["checked"]
-    out["provable_damage"] = checked["provable_damage"]
-    out["outside_lens_damage"] = checked["outside_lens_damage"]
-    out["unverifiable_paths"] = checked["unverifiable"]
-    out["attack_artifacts_removed"] = checked["attack_artifacts_removed"]
-    out["unexplained"] = judgement.get("unexplained")
-    out["judgement"] = judgement
+    # Only the clearing half is answered here, and it needs no model: an artifact is cleared when it
+    # is back to its T0 state. Damage used to be answered here too, by asking a judge which paths
+    # the commands implicated and checking those -- a layer that existed only because the evidence
+    # covered part of the machine. _image_damage() answers it from the whole filesystem instead.
+    out = sr.reward(d)
     print(f"  snapshot diff: {d['counts']}")
-    print(f"  commands: {len(commands)} run, {len(refused)} refused | judge named "
-          f"{len(judgement.get('paths_to_check') or [])} paths -> verified {checked['counts']}")
-    if checked["outside_lens_damage"]:
-        print(f"  !! damage outside the snapshot lens: {checked['outside_lens_damage']}")
-    print(f"  reward(scenario-free): value={out.get('value')} cleared={out.get('threat_cleared')} "
-          f"collateral={out.get('collateral_damage')} ({out.get('collateral_count')} artifacts)")
+    print(f"  cleared: {out.get('threat_cleared')} of a {out.get('footprint')}-artifact footprint, "
+          f"not_cleared={out.get('not_cleared')}")
     return out
 
 
-def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float) -> Dict[str, Any]:
+def _image_damage(ep_dir: Path, images: Dict[str, str], commands: List[Dict[str, Any]],
+                  refused: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Did the episode damage the machine? Whole-filesystem evidence, judged by a tool-using agent.
+
+    Two things are separated here on purpose. The attack's footprint is derived -- whatever differs
+    between the healthy machine and the machine with the attack on it, before the agent acted -- so
+    nothing the attack did is ever charged to the agent. What the agent did is everything else.
+
+    The judge is given the commands and a one-line-per-path change list, and chooses what to read;
+    it is not handed file contents up front. Its verdict is recorded next to the change list it was
+    working from, so the two can be checked against each other later.
+    """
+    from ice.exercise import image, judge_agent
+    base, armed, final = images["baseline"], images["armed"], images["final"]
+    attack = image.diff(base, armed)                 # the attack's own footprint
+    overall = image.changes(base, final)             # healthy machine vs what the agent left
+    agent_side = image.changes(armed, final)         # everything that happened while the agent ran
+    (ep_dir / "image-changes.json").write_text(json.dumps(
+        {"images": images, "attack_footprint": attack["counts"],
+         "baseline_to_final": overall, "armed_to_final": agent_side},
+        ensure_ascii=False, indent=1))
+    print(f"  images: attack footprint {attack['counts']['added']}+{attack['counts']['modified']} "
+          f"| baseline->final {len(overall)} paths | armed->final {len(agent_side)} paths")
+    verdict = judge_agent.judge(base, final, commands, refused)
+    (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
+    if verdict.get("error"):
+        print(f"  !! damage judge failed: {verdict['error']}")
+    else:
+        dmg = verdict.get("damage") or []
+        print(f"  damage judge: {len(dmg)} finding(s) in {verdict.get('steps')} steps, "
+              f"read {len(verdict.get('paths_read') or [])}/{len(overall)} paths"
+              + (f" -> {[d.get('path') for d in dmg]}" if dmg else ""))
+    return {"images": images, "attack_footprint": attack["counts"],
+            "changed_paths_total": len(overall), "changed_paths_during_agent": len(agent_side),
+            "damage": verdict.get("damage"), "collateral_free": verdict.get("collateral_free"),
+            "paths_read": verdict.get("paths_read"), "judge_steps": verdict.get("steps"),
+            "judge_error": verdict.get("error"), "notes": verdict.get("notes")}
+
+
+def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
+           images: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     ep_dir.mkdir(parents=True, exist_ok=True)
     audit = STATE / "audit.jsonl"
     if audit.exists():
@@ -515,6 +428,13 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
     snap_reward: Dict[str, Any] = {"skipped": "no case"}
     if case:
         snap_reward = _snapshot_reward(ep_dir, case, trajectory)
+    # Damage is answered from the whole filesystem, not from the nine tables osquery collects.
+    from ice.exercise import command_trace as ct
+    audit_path = ep_dir / "ice-audit.jsonl"
+    damage: Dict[str, Any] = {"skipped": "no images"}
+    if images:
+        damage = _image_damage(ep_dir, images, ct.executed_commands(audit_path),
+                               ct.refused_commands(audit_path))
     meta = {
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
@@ -532,6 +452,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         "agent_judgement": judgement,
         "reward": rwd,                      # scenario-based (markers + declared artifacts)
         "reward_scenario_free": snap_reward,  # derived from T1-T0; the one to train on
+        "image_damage": damage,               # whole-filesystem: did the agent break anything
         "counts": {
             "audit_events": sum(1 for _ in (ep_dir / "ice-audit.jsonl").open())
             if (ep_dir / "ice-audit.jsonl").exists() else 0,
@@ -561,6 +482,12 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         print(f"  [arm] force-escalate flag on ({flag})")
     for c in scenario.attack:
         sh(c, "attack")
+    from ice.exercise import image
+    # Two images bracket the agent: the machine with the attack on it but before the agent has
+    # acted, and the machine it left behind. The first makes the attack's own footprint derivable,
+    # so a change belonging to the attack is never charged to the agent.
+    images = {"baseline": IMAGE_BASELINE, "armed": f"{ep}-armed", "final": f"{ep}-final"}
+    image.take(images["armed"])
     print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
     case = wait_for_case(scenario.markers, armed)
     if flag:
@@ -572,7 +499,8 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         time.sleep(SETTLE_SECONDS)
     else:
         print("  NO case within timeout")
-    meta = export(DATASET / ep, scenario, case, armed)
+    image.take(images["final"])
+    meta = export(DATASET / ep, scenario, case, armed, images)
     if dirty:
         meta["reset_residue"] = dirty
         (DATASET / ep / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
@@ -586,19 +514,13 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
 def main() -> None:
     ap = argparse.ArgumentParser(description="ICE trajectory dataset recorder")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("snapshot", help="capture the pristine baseline (run on a clean box)")
-    sub.add_parser("manifest", help="refresh only the scratch manifest, leaving the tarball alone")
+    sub.add_parser("snapshot", help="rebuild the post_state tarball from the baseline image")
     r = sub.add_parser("run", help="record episodes")
     r.add_argument("scenario", choices=sorted(SCENARIOS))
     r.add_argument("--episodes", type=int, default=1)
     a = ap.parse_args()
     if a.cmd == "snapshot":
         snapshot()
-        return
-    if a.cmd == "manifest":
-        # Separate from `snapshot` on purpose: widening the listed roots must not silently rewrite
-        # the tarball, which is what defines the healthy bytes every episode is scored against.
-        write_scratch_manifest()
         return
     if os.environ.get("ICE_RECORD_MODE") != "1":
         raise SystemExit("set the recording posture first: source ice/serving/record_env.sh")

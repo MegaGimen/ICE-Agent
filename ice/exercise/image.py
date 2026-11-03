@@ -52,6 +52,7 @@ EXCLUDES: Tuple[str, ...] = (
     "/root/node24",              # node, for the agent
     "/root/.openclaw",           # the agent's own install and state
     "/root/ice-build",           # daemon logs
+    "/root/ice-state",           # the daemon's own state dir, rebuilt every episode
 )
 
 
