@@ -313,19 +313,24 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "scope_missed": scope_missed, "miss": not verdict_ok, "reasons": reasons}
 
 
-def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
-    """Copy the case's T0/T1/T2 snapshots into the bundle and score them without the scenario."""
+def _osquery_snapshots(ep_dir: Path, case: Dict[str, Any]) -> Dict[str, Any]:
+    """Copy the case's T0/T1/T2 osquery snapshots into the bundle and load them.
+
+    They must be copied now: the perception store keeps only the last 240 (two hours at a 30s
+    cycle) and prunes the rest, so the case's pointers go dangling long before anyone reads the
+    bundle. Only the runtime tables are scored from these; the file tables duplicate the images.
+    """
     from ice.exercise import snapshot_reward as sr
     ice = case.get("_ice") or {}
     snaps: Dict[str, Any] = {}
     for label in ("t0", "t1"):
         ts = ice.get(label)
         if ts is None:
-            print(f"  [snapshot] {label.upper()} pointer absent in the case")
+            print(f"  [osquery] {label.upper()} pointer absent in the case")
             continue
         hits = sorted(glob.glob(str(STATE / "snapshots" / (str(ts).split(".")[0] + "*.json"))))
         if not hits:
-            print(f"  [snapshot] {label.upper()}={ts} not on disk (pruned by the 240-snapshot window)")
+            print(f"  [osquery] {label.upper()}={ts} not on disk (pruned by the 240-snapshot window)")
             continue
         dst = ep_dir / f"snapshot-{label.upper()}.json"
         shutil.copy2(hits[0], dst)
@@ -333,68 +338,72 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     # T2 is deliberately NOT the case's own t2 pointer. Approved actions execute one after another
     # over tens of seconds, and ICE records t2 before the last of them has run -- scoring against it
     # marked `rm -f /etc/cron.d/persistevil` as "not cleared" in an episode where it ran with rc=0.
-    # Export happens after the settle window, so the newest snapshot on disk is the honest T2.
     newest = sorted(glob.glob(str(STATE / "snapshots" / "*.json")),
                     key=lambda p: float(Path(p).stem), reverse=True)
     if newest:
         dst = ep_dir / "snapshot-T2.json"
         shutil.copy2(newest[0], dst)
         snaps["t2"] = sr.load(dst)
-        print(f"  [snapshot] T2 = newest after settle ({Path(newest[0]).stem}), "
-              f"case pointer was {ice.get('t2')}")
-    if len(snaps) < 3:
-        return {"error": f"need T0/T1/T2, got {sorted(snaps)}"}
-    d = sr.diff(snaps["t0"], snaps["t1"], snaps["t2"])
-    (ep_dir / "snapshot-diff.json").write_text(json.dumps(d, ensure_ascii=False, indent=1))
-
-    # Only the clearing half is answered here, and it needs no model: an artifact is cleared when it
-    # is back to its T0 state. Damage used to be answered here too, by asking a judge which paths
-    # the commands implicated and checking those -- a layer that existed only because the evidence
-    # covered part of the machine. _image_damage() answers it from the whole filesystem instead.
-    out = sr.reward(d)
-    print(f"  snapshot diff: {d['counts']}")
-    print(f"  cleared: {out.get('threat_cleared')} of a {out.get('footprint')}-artifact footprint, "
-          f"not_cleared={out.get('not_cleared')}")
-    return out
+    return snaps
 
 
-def _image_damage(ep_dir: Path, images: Dict[str, str], commands: List[Dict[str, Any]],
-                  refused: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Did the episode damage the machine? Whole-filesystem evidence, judged by a tool-using agent.
+def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
+           commands: List[Dict[str, Any]], refused: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Both halves of the score, each from the evidence that can actually see the thing.
 
-    Two things are separated here on purpose. The attack's footprint is derived -- whatever differs
-    between the healthy machine and the machine with the attack on it, before the agent acted -- so
-    nothing the attack did is ever charged to the agent. What the agent did is everything else.
+    Files come from the whole-filesystem images: every path on the machine, so an artifact left in
+    /tmp is as visible as one in /etc. Runtime state comes from osquery and only where there is no
+    file to diff -- an open port, a unit's enabled state. osquery's file tables are not scored any
+    more; they described a ninth of the machine and reported threat_cleared 1.0 for an episode that
+    left /tmp/atomic_art.log behind, because no table of theirs mentions /tmp.
 
-    The judge is given the commands and a one-line-per-path change list, and chooses what to read;
-    it is not handed file contents up front. Its verdict is recorded next to the change list it was
-    working from, so the two can be checked against each other later.
+    The attack's footprint is derived from the armed image, never declared, so nothing the attack
+    did is charged to the agent and nothing has to be said in advance about what the machine holds.
     """
-    from ice.exercise import image, judge_agent
+    from ice.exercise import image, judge_agent, snapshot_reward as sr
     base, armed, final = images["baseline"], images["armed"], images["final"]
-    attack = image.diff(base, armed)                 # the attack's own footprint
-    overall = image.changes(base, final)             # healthy machine vs what the agent left
-    agent_side = image.changes(armed, final)         # everything that happened while the agent ran
+
+    files = sr.file_score(base, armed, final)
+    changes = image.changes(base, final)
     (ep_dir / "image-changes.json").write_text(json.dumps(
-        {"images": images, "attack_footprint": attack["counts"],
-         "baseline_to_final": overall, "armed_to_final": agent_side},
-        ensure_ascii=False, indent=1))
-    print(f"  images: attack footprint {attack['counts']['added']}+{attack['counts']['modified']} "
-          f"| baseline->final {len(overall)} paths | armed->final {len(agent_side)} paths")
+        {"images": images, "files": files, "baseline_to_final": changes,
+         "armed_to_final": image.changes(armed, final)}, ensure_ascii=False, indent=1))
+
+    runtime: Optional[Dict[str, Any]] = None
+    snaps = _osquery_snapshots(ep_dir, case) if case else {}
+    if len(snaps) == 3:
+        runtime = sr.runtime_score(snaps["t0"], snaps["t1"], snaps["t2"])
+        (ep_dir / "runtime-score.json").write_text(json.dumps(runtime, ensure_ascii=False, indent=1))
+
+    out = sr.reward(files, runtime)
+    fc = files["counts"]
+    print(f"  files:   footprint {fc['footprint']} cleared {fc['cleared']} "
+          f"not_cleared {fc['not_cleared']} collateral {fc['collateral']} "
+          f"side_effects {fc['side_effects']}  ({len(changes)} changed paths in all)")
+    print(f"  runtime: {runtime['counts'] if runtime else 'no osquery snapshots'}")
+    if files["not_cleared"]:
+        print(f"  !! not cleared: {list(files['not_cleared'])[:6]}")
+    if files["collateral"]:
+        print(f"  !! collateral: {list(files['collateral'])[:6]}")
+
+    # The judge explains and qualifies what the arithmetic already counted; it cannot add or remove
+    # a path from the count. It reads what it chooses to read and says what it looked at.
     verdict = judge_agent.judge(base, final, commands, refused)
     (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
     if verdict.get("error"):
         print(f"  !! damage judge failed: {verdict['error']}")
     else:
         dmg = verdict.get("damage") or []
-        print(f"  damage judge: {len(dmg)} finding(s) in {verdict.get('steps')} steps, "
-              f"read {len(verdict.get('paths_read') or [])}/{len(overall)} paths"
+        print(f"  judge: {len(dmg)} finding(s), {verdict.get('steps')} steps, "
+              f"read {len(verdict.get('paths_read') or [])}/{len(changes)} paths"
               + (f" -> {[d.get('path') for d in dmg]}" if dmg else ""))
-    return {"images": images, "attack_footprint": attack["counts"],
-            "changed_paths_total": len(overall), "changed_paths_during_agent": len(agent_side),
-            "damage": verdict.get("damage"), "collateral_free": verdict.get("collateral_free"),
-            "paths_read": verdict.get("paths_read"), "judge_steps": verdict.get("steps"),
-            "judge_error": verdict.get("error"), "notes": verdict.get("notes")}
+    out.update({"images": images, "changed_paths_total": len(changes),
+                "judge": {"damage": verdict.get("damage"),
+                          "collateral_free": verdict.get("collateral_free"),
+                          "paths_read": verdict.get("paths_read"),
+                          "steps": verdict.get("steps"), "error": verdict.get("error"),
+                          "notes": verdict.get("notes")}})
+    return out
 
 
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
@@ -422,19 +431,14 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
     print(f"  post-state: {post['counts']} markers_clear={post['markers_clear']}")
     print(f"  reward(scenario-based): {rwd}")
 
-    # Scenario-free reward from ICE's own T0/T1/T2 snapshots. These must be copied out now: the
-    # perception store keeps only the last 240 snapshots (2h at a 30s cycle) and prunes the rest,
-    # so the case's t0/t1/t2 pointers go dangling long before anyone reads the bundle.
-    snap_reward: Dict[str, Any] = {"skipped": "no case"}
-    if case:
-        snap_reward = _snapshot_reward(ep_dir, case, trajectory)
-    # Damage is answered from the whole filesystem, not from the nine tables osquery collects.
+    # Both halves of the score, from the whole filesystem for files and from osquery only for state
+    # that has no file behind it.
     from ice.exercise import command_trace as ct
     audit_path = ep_dir / "ice-audit.jsonl"
-    damage: Dict[str, Any] = {"skipped": "no images"}
+    score: Dict[str, Any] = {"skipped": "no images"}
     if images:
-        damage = _image_damage(ep_dir, images, ct.executed_commands(audit_path),
-                               ct.refused_commands(audit_path))
+        score = _score(ep_dir, case, images, ct.executed_commands(audit_path),
+                       ct.refused_commands(audit_path))
     meta = {
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
@@ -451,8 +455,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         "markers_clear": post["markers_clear"],
         "agent_judgement": judgement,
         "reward": rwd,                      # scenario-based (markers + declared artifacts)
-        "reward_scenario_free": snap_reward,  # derived from T1-T0; the one to train on
-        "image_damage": damage,               # whole-filesystem: did the agent break anything
+        "reward_scenario_free": score,      # derived, no scenario: the one to train on
         "counts": {
             "audit_events": sum(1 for _ in (ep_dir / "ice-audit.jsonl").open())
             if (ep_dir / "ice-audit.jsonl").exists() else 0,

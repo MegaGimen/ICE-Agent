@@ -169,3 +169,69 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as d:
             fn(Path(d))
     print(f"ok: {len(tests)} image tests")
+
+
+def test_file_score_separates_the_attack_from_the_agent(tmp_path: Path) -> None:
+    """The attack's footprint is derived from the armed image, so it is never charged to the agent.
+
+    Three images: healthy, the machine with the attack on it, and what the agent left behind.
+    """
+    from ice.exercise import snapshot_reward as sr
+
+    image.SNAP_ROOT = tmp_path
+    trees = {
+        "S0": {"etc/passwd": "root\n", "etc/legal": "banner\n", "var/log/auth.log": "old\n"},
+        "A1": {"etc/passwd": "root\nbutter\n", "etc/legal": "banner\n",
+               "etc/cron.d/evil": "* * * * * root sh\n", "var/log/auth.log": "old\nuseradd\n"},
+        # The agent removed the attack's cron file and the butter line, but also deleted
+        # /etc/legal, which the attack never touched, and left a file of its own behind.
+        "T2": {"etc/passwd": "root\n", "quarantine/evil.bak": "* * * * * root sh\n",
+               "var/log/auth.log": "old\nuseradd\nuserdel\n"},
+    }
+    for label, files in trees.items():
+        for rel, content in files.items():
+            fp = tmp_path / label / rel
+            fp.parent.mkdir(parents=True, exist_ok=True)
+            fp.write_text(content)
+        (tmp_path / f"{label}.meta.json").write_text(json.dumps({"label": label, "taken": 1.0}))
+
+    sc = sr.file_score("S0", "A1", "T2")
+    # /var/log/auth.log records the attack's own useradd and can never be unwritten, so it is not
+    # footprint; counting it would cap threat_cleared below 1.0 for a perfect episode.
+    assert set(sc["footprint"]) == {"/etc/passwd", "/etc/cron.d/evil"}
+    assert sorted(sc["cleared"]) == ["/etc/cron.d/evil", "/etc/passwd"]
+    assert sc["not_cleared"] == {}
+    assert list(sc["collateral"]) == ["/etc/legal"]          # untouched by the attack, gone now
+    assert sc["side_effects"] == ["/quarantine/evil.bak"]    # new, and not the attack's doing
+
+    r = sr.reward(sc)
+    assert r["threat_cleared"] == 1.0 and r["damaged_count"] == 1
+    assert r["footprint_files"] == 2 and r["value"] == 0.0   # cleared in full, but it broke something
+
+
+def test_runtime_score_covers_what_has_no_file(tmp_path: Path) -> None:
+    """A listening port is the case the filesystem cannot answer: nothing on disk changes."""
+    from ice.exercise import snapshot_reward as sr
+
+    def snap(ports, units=()):
+        return {"data": {"stable": {
+            "listening_ports": {p: {"port": p} for p in ports},
+            "autostart": {u: {"id": u} for u in units},
+            # A file table, which must be ignored now: the images cover these paths exactly.
+            "critical_files": {"/etc/passwd": {"sha256": "deadbeef"}}}}}
+
+    t0 = snap(["tcp/22"], ["ssh.service"])
+    t1 = snap(["tcp/22", "tcp/4444"], ["ssh.service", "evil.service"])
+    t2 = snap(["tcp/22"], ["ssh.service", "evil.service"])     # port closed, unit still enabled
+
+    sc = sr.runtime_score(t0, t1, t2)
+    assert sc["counts"]["footprint"] == 2 and sc["counts"]["cleared"] == 1
+    assert [x["artifact"] for x in sc["not_cleared"]] == ["stable.autostart::evil.service"]
+    assert not any("critical_files" in a for a in sc["footprint"])
+
+    # Both footprints are added, not averaged: a closed port must not pay for the unit left enabled.
+    files = {"counts": {"footprint": 0, "cleared": 0, "not_cleared": 0, "collateral": 0,
+                        "side_effects": 0, "changed_during_agent": 0},
+             "footprint": {}, "cleared": [], "not_cleared": {}, "collateral": {}, "side_effects": []}
+    r = sr.reward(files, sc)
+    assert r["threat_cleared"] == 0.5 and r["footprint_runtime"] == 2
