@@ -207,9 +207,25 @@ def test_file_score_separates_the_attack_from_the_agent(tmp_path: Path) -> None:
     assert sr.volatile("/etc/shadow-") and not sr.volatile("/etc/shadow")
     assert sc["side_effects"] == ["/quarantine/evil.bak"]    # new, and not the attack's doing
 
-    r = sr.reward(sc)
+    clean = {"threat_gone": True, "residue": [], "damage": [], "collateral_free": True}
+    r = sr.reward(sc, None, clean)
     assert r["threat_cleared"] == 1.0 and r["damaged_count"] == 1
     assert r["footprint_files"] == 2 and r["value"] == 0.0   # cleared in full, but it broke something
+
+    # Neither source can hide what the other saw. The judge adds residue the arithmetic could not
+    # attribute -- an attack's cron can create a file after the armed snapshot was taken, which
+    # leaves the arithmetic no way to call it the attack's -- and it adds damage the counts missed.
+    found = {"threat_gone": False, "residue": [{"path": "/tmp/attack.log", "why": "cron output"}],
+             "damage": [{"path": "/etc/hosts", "what": "corrupted"}]}
+    r = sr.reward(sc, None, found)
+    assert r["footprint_files"] == 3 and r["threat_gone"] is False
+    assert r["not_cleared"] == ["/tmp/attack.log"] and r["threat_cleared"] == round(2 / 3, 4)
+    assert r["damaged"] == ["/etc/hosts", "/etc/legal"]
+
+    # An episode nobody judged is not scored. It used to come out as a confident value 1.0.
+    r = sr.reward(sc, None, {"error": "URLError: connection timed out"})
+    assert r["scored"] is False and r["value"] is None and r["threat_gone"] is None
+    assert r["unscored_reason"].startswith("URLError")
 
 
 def test_runtime_score_covers_what_has_no_file(tmp_path: Path) -> None:
@@ -236,5 +252,5 @@ def test_runtime_score_covers_what_has_no_file(tmp_path: Path) -> None:
     files = {"counts": {"footprint": 0, "cleared": 0, "not_cleared": 0, "collateral": 0,
                         "side_effects": 0, "changed_during_agent": 0},
              "footprint": {}, "cleared": [], "not_cleared": {}, "collateral": {}, "side_effects": []}
-    r = sr.reward(files, sc)
+    r = sr.reward(files, sc, {"threat_gone": True, "residue": [], "damage": []})
     assert r["threat_cleared"] == 0.5 and r["footprint_runtime"] == 2

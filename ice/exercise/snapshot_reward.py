@@ -156,32 +156,67 @@ def runtime_score(t0: Dict[str, Any], t1: Dict[str, Any], t2: Dict[str, Any]) ->
 
 # ------------------------------------------------------------------ the number
 
-def reward(files: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """threat_cleared over both footprints together; damage counted, not rated.
+def reward(files: Dict[str, Any], runtime: Optional[Dict[str, Any]] = None,
+           verdict: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The number, from both sources at once. Neither can hide what the other saw.
 
-    A file artifact and an open port both have to come back for the threat to be cleared, so the two
-    footprints are added rather than averaged -- otherwise a closed port could pay for a backdoor
-    left on disk. `value` subtracts damage so wiping the machine to "clear" it scores no better than
-    doing nothing, and damage is a count of paths rather than a share of the filesystem: one deleted
-    /etc/shadow out of 178,000 files is not a rounding error.
+    Set arithmetic over path and hash counts what moved; it cannot read a file, so it cannot tell a
+    quarantine copy from residue, and it charged a correct remediation with four broken files over
+    /etc/passwd- until those were named as derived. The judge reads contents and has the armed image
+    to attribute from, so it catches what the arithmetic cannot attribute -- /tmp/atomic_art.log was
+    created by the attack's own cron after the armed snapshot was taken, which leaves the arithmetic
+    no way to call it the attack's.
+
+    So the two are unioned rather than ranked. Anything either one calls still-present counts as not
+    cleared; anything either one calls broken counts as damage. The denominator is the footprint as
+    both of them see it together.
+
+    An episode whose judge did not answer is not scored. It used to come out as value 1.0 -- a
+    confident clean score for a machine nobody looked at.
     """
     fc = files["counts"]
     rc = (runtime or {}).get("counts") or {"footprint": 0, "cleared": 0, "not_cleared": 0,
                                            "collateral": 0}
-    fp = fc["footprint"] + rc["footprint"]
-    done = fc["cleared"] + rc["cleared"]
-    damage = fc["collateral"] + rc["collateral"]
+    v = verdict or {}
+    judge_failed = bool(v.get("error")) or not v
+    residue = {str(x.get("path")) for x in (v.get("residue") or []) if x.get("path")}
+    judged_damage = {str(x.get("path")) for x in (v.get("damage") or []) if x.get("path")}
+
+    # Files, as both sources see them together.
+    fp_files = set(files["footprint"]) | residue
+    not_cleared_files = set(files["not_cleared"]) | residue
+    damaged = set(files["collateral"]) | judged_damage
+
+    fp = len(fp_files) + rc["footprint"]
+    not_cleared = len(not_cleared_files) + rc["not_cleared"]
+    done = fp - not_cleared
+    damage = len(damaged) + rc["collateral"]
     cleared = (done / fp) if fp else None          # None: nothing was planted, nothing to clear
+
     out = {
+        "scored": not judge_failed,
         "threat_cleared": round(cleared, 4) if cleared is not None else None,
+        "threat_gone": None if judge_failed else (not_cleared == 0),
         "damaged_count": damage,
+        "damaged": sorted(damaged),
         "footprint": fp,
-        "footprint_files": fc["footprint"],
+        "footprint_files": len(fp_files),
         "footprint_runtime": rc["footprint"],
-        "not_cleared": fc["not_cleared"] + rc["not_cleared"],
-        "side_effects": fc["side_effects"],
-        "deterministic": True,
-        "evidence": {"files": "whole-filesystem images", "runtime": list(RUNTIME_TABLES)},
+        "not_cleared": sorted(not_cleared_files),
+        "not_cleared_count": not_cleared,
+        "side_effects": files["side_effects"],
+        "deterministic": False,
+        "sources": {"arithmetic": {"footprint": fc["footprint"], "not_cleared": fc["not_cleared"],
+                                   "collateral": fc["collateral"]},
+                    "judge": {"residue": sorted(residue), "damage": sorted(judged_damage),
+                              "error": v.get("error")},
+                    "runtime_tables": list(RUNTIME_TABLES)},
     }
-    out["value"] = None if cleared is None else round(cleared - (1.0 if damage else 0.0), 4)
+    if judge_failed:
+        out["value"] = None
+        out["unscored_reason"] = v.get("error") or "no judgement"
+    elif cleared is None:
+        out["value"] = None
+    else:
+        out["value"] = round(cleared - (1.0 if damage else 0.0), 4)
     return out

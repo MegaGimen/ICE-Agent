@@ -375,7 +375,6 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
         runtime = sr.runtime_score(snaps["t0"], snaps["t1"], snaps["t2"])
         (ep_dir / "runtime-score.json").write_text(json.dumps(runtime, ensure_ascii=False, indent=1))
 
-    out = sr.reward(files, runtime)
     fc = files["counts"]
     print(f"  files:   footprint {fc['footprint']} cleared {fc['cleared']} "
           f"not_cleared {fc['not_cleared']} collateral {fc['collateral']} "
@@ -386,19 +385,33 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     if files["collateral"]:
         print(f"  !! collateral: {list(files['collateral'])[:6]}")
 
-    # The judge explains and qualifies what the arithmetic already counted; it cannot add or remove
-    # a path from the count. It reads what it chooses to read and says what it looked at.
-    verdict = judge_agent.judge(base, final, commands, refused)
+    # The judge answers both questions, with the armed image available so it can tell the attack's
+    # own doing from the agent's. The set arithmetic is kept beside it, not over it: comparing path
+    # and hash cannot read a file, which is why it charged a correct remediation with four broken
+    # files over /etc/passwd- while the judge, having read the contents, called it userdel's normal
+    # behaviour and was right.
+    verdict = judge_agent.judge(base, final, commands, refused, armed=armed)
     (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
     if verdict.get("error"):
         print(f"  !! damage judge failed: {verdict['error']}")
     else:
         dmg = verdict.get("damage") or []
-        print(f"  judge: {len(dmg)} finding(s), {verdict.get('steps')} steps, "
-              f"read {len(verdict.get('paths_read') or [])}/{len(changes)} paths"
-              + (f" -> {[d.get('path') for d in dmg]}" if dmg else ""))
+        res = verdict.get("residue") or []
+        print(f"  judge: threat_gone={verdict.get('threat_gone')} residue={len(res)} "
+              f"damage={len(dmg)} | {verdict.get('steps')} steps, "
+              f"read {len(verdict.get('paths_read') or [])}/{len(changes)} paths")
+        for label, items in (("residue", res), ("damage", dmg)):
+            for it in items[:6]:
+                print(f"    {label}: {it.get('path')} — "
+                      f"{(it.get('why') or it.get('what') or '')[:90]}")
+    out = sr.reward(files, runtime, verdict)
+    print(f"  score: threat_cleared={out['threat_cleared']} damaged={out['damaged_count']} "
+          f"value={out['value']}" + ("" if out["scored"] else
+                                     f"  [UNSCORED: {out.get('unscored_reason')}]"))
     out.update({"images": images, "changed_paths_total": len(changes),
-                "judge": {"damage": verdict.get("damage"),
+                "judge": {"threat_gone": verdict.get("threat_gone"),
+                          "residue": verdict.get("residue"),
+                          "damage": verdict.get("damage"),
                           "collateral_free": verdict.get("collateral_free"),
                           "paths_read": verdict.get("paths_read"),
                           "steps": verdict.get("steps"), "error": verdict.get("error"),
