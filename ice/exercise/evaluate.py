@@ -229,6 +229,53 @@ Reply with ONLY a JSON object:
 }}"""
 
 
+def json_object(text: str) -> Any:
+    """The first complete JSON object in a model reply, or None.
+
+    `json.loads(text)` on the whole reply is what threw away a correct judgement: the model normally
+    returns bare JSON, but on one episode it put a sentence first, so parsing failed at char 0 and
+    the paths it had worked out -- all of them right -- were discarded, leaving the verification
+    layer empty. Nothing else about that run looked wrong, which is what made it worth guarding.
+    """
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    dec = json.JSONDecoder()
+    for i, ch in enumerate(text or ""):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = dec.raw_decode(text, i)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+def paths_from(j: Dict[str, Any]) -> List[str]:
+    """Absolute paths the judge named, wherever it put them.
+
+    `paths_to_check` is what the prompt asks for, but a model that answers in the per-command shape
+    instead (and one renamed `command_effects` to `commands`) has still done the job. Reading the
+    nested lists too keeps a usable answer usable; the caller verifies every path on disk either way.
+    """
+    out: List[str] = [p for p in (j.get("paths_to_check") or []) if str(p).startswith("/")]
+    for key, value in j.items():
+        if key == "paths_to_check" or not isinstance(value, list):
+            continue
+        for item in value:
+            if isinstance(item, dict):
+                out.extend(p for p in (item.get("paths") or []) if str(p).startswith("/"))
+    seen, uniq = set(), []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
 COMMAND_PROMPT = """You are helping audit one episode of an autonomous host-defence agent.
 
 Below are the exact commands the episode really ran, taken from a machine-written audit log, each
@@ -335,11 +382,17 @@ def judge_diff(d: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
         return {"error": f"{type(e).__name__}: {e}"}
     text = ((resp.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
     out: Dict[str, Any] = {"model": resp.get("model"), "usage": resp.get("usage")}
-    try:
-        out.update(json.loads(text))
-    except json.JSONDecodeError as e:
-        out["parse_error"] = str(e)
-        out["raw"] = text[-800:]
+    obj = json_object(text)
+    if obj is None:
+        # Keep the head as well as the tail: a parse failure at char 0 is caused by what comes
+        # first, and storing only the last 800 characters hid that for a whole episode.
+        out["parse_error"] = "no JSON object in reply"
+        out["raw_head"], out["raw_tail"] = text[:800], text[-800:]
+        return out
+    out.update(obj)
+    out["paths_to_check"] = paths_from(obj)
+    if text.strip()[:1] != "{":
+        out["json_recovered_from_prose"] = True
     return out
 
 

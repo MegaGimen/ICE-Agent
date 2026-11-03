@@ -168,6 +168,36 @@ def test_lens_matches_directory_scans() -> None:
         assert not ct.in_lens(p, lens), p
 
 
+def test_judge_reply_parsing() -> None:
+    """A correct judgement must survive the shapes a model actually replies in.
+
+    Both of these were real: one episode's reply had a sentence before the object, so parsing the
+    whole string failed at char 0 and every path the judge had worked out -- all of them right --
+    was discarded, leaving the verification layer empty. The same reply also named its per-command
+    list `commands` rather than the `command_effects` the prompt asks for.
+    """
+    from ice.exercise.evaluate import json_object, paths_from
+
+    assert json_object('{"a": 1}') == {"a": 1}
+    assert json_object('Let me work through each command.\n\n{"paths_to_check": ["/etc/passwd"]}') \
+        == {"paths_to_check": ["/etc/passwd"]}
+    assert json_object("```json\n{\"a\": 2}\n```") == {"a": 2}
+    assert json_object("no json here") is None
+    assert json_object("") is None
+
+    # Renamed key, paths nested per command: still a usable answer.
+    assert paths_from({"commands": [{"command": "userdel butter",
+                                     "paths": ["/etc/passwd", "/etc/shadow"]},
+                                    {"command": "rm -f /etc/cron.d/x",
+                                     "paths": ["/etc/cron.d/x"]}]}) \
+        == ["/etc/passwd", "/etc/shadow", "/etc/cron.d/x"]
+    # The flat list wins first place, nested paths are added, duplicates collapse, globs dropped.
+    assert paths_from({"paths_to_check": ["/etc/group", "not-a-path"],
+                       "command_effects": [{"paths": ["/etc/group", "/etc/gshadow"]}]}) \
+        == ["/etc/group", "/etc/gshadow"]
+    assert paths_from({}) == []
+
+
 if __name__ == "__main__":
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -179,4 +209,6 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         test_symlinked_scratch_root_answers_consistently(Path(d))
     test_lens_matches_directory_scans()
-    print("ok: 8 statuses, scratch manifest rules on /tmp, lens covers directory scans")
+    test_judge_reply_parsing()
+    print("ok: 8 statuses, scratch manifest rules on /tmp, lens covers directory scans, "
+          "judge replies parse")
