@@ -218,6 +218,17 @@ def verify_clean(scenario: Scenario) -> List[str]:
     return dirty
 
 
+def _listed_paths(out: str) -> List[str]:
+    """Absolute paths from an `ls` inside the VM, and nothing else.
+
+    When the listing silently became a bare `ls` of the home directory, the recorder copied the
+    bare names it printed -- scp resolved them against the remote home and succeeded, so a posture
+    file ended up in the bundle looking like evidence. A path that is not absolute did not come
+    from the listing that was asked for.
+    """
+    return [w for w in out.split() if w.startswith("/")]
+
+
 def pull(remote: str, local: Path) -> bool:
     """Copy one file out of the VM."""
     from ice.exercise import vm
@@ -255,8 +266,7 @@ def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[
     deadline = time.time() + INVESTIGATE_TIMEOUT
     misses = 0
     while time.time() < deadline:
-        listing = vm.ssh(["bash", "-lc", f"ls -t {STATE}/cases/case-*.json 2>/dev/null | head -20"],
-                         check=False, timeout=60)
+        listing = vsh(f"ls -t {STATE}/cases/case-*.json 2>/dev/null | head -20", timeout=60)
         if listing.returncode != 0:
             misses += 1
             if not vm.running(live):
@@ -272,7 +282,7 @@ def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[
             time.sleep(15)
             continue
         misses = 0
-        for path in listing.stdout.split():
+        for path in _listed_paths(listing.stdout):
             d = pull_json(path)
             if not d or "assessment" not in (d.get("_ice") or {}):
                 continue
@@ -509,20 +519,17 @@ def collect(ep_dir: Path, case: Optional[Dict[str, Any]]) -> None:
     The osquery snapshots in particular cannot wait: the perception store keeps only the last 240,
     two hours at a 30 second cycle, and prunes the rest.
     """
-    from ice.exercise import vm
     ep_dir.mkdir(parents=True, exist_ok=True)
     pull(f"{STATE}/audit.jsonl", ep_dir / "ice-audit.jsonl")
-    listing = vm.ssh(["bash", "-lc", f"ls {STATE}/cases/case-*.json 2>/dev/null"],
-                     check=False, timeout=60)
-    for path in listing.stdout.split():
+    listing = vsh(f"ls {STATE}/cases/case-*.json 2>/dev/null", timeout=60)
+    for path in _listed_paths(listing.stdout):
         pull(path, ep_dir / Path(path).name)
     ice = (case or {}).get("_ice") or {}
     wanted = [str(ice.get(k)).split(".")[0] for k in ("t0", "t1") if ice.get(k)]
-    snaps = vm.ssh(["bash", "-lc",
-                    f"ls -t {STATE}/snapshots/*.json 2>/dev/null | head -1; "
-                    + "; ".join(f"ls {STATE}/snapshots/{w}*.json 2>/dev/null" for w in wanted)],
-                   check=False, timeout=60)
-    for path in dict.fromkeys(snaps.stdout.split()):
+    snaps = vsh(f"ls -t {STATE}/snapshots/*.json 2>/dev/null | head -1; "
+                + "; ".join(f"ls {STATE}/snapshots/{w}*.json 2>/dev/null" for w in wanted),
+                timeout=60)
+    for path in dict.fromkeys(_listed_paths(snaps.stdout)):
         pull(path, ep_dir / ("osq-" + Path(path).name))
     pull("/root/ice-build/daemon.log", ep_dir / "daemon.log")
 

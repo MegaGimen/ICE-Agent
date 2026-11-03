@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -299,8 +300,18 @@ def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
 
 def ssh(argv: List[str], check: bool = True, timeout: Optional[float] = 300,
         capture: bool = True) -> subprocess.CompletedProcess:
-    """Run a command inside the VM. argv is passed through, not shell-joined by us."""
-    cmd = ["ssh", *_ssh_base(), "root@127.0.0.1", *argv]
+    """Run one command inside the VM, with argv arriving as argv.
+
+    ssh does not preserve argument boundaries: it concatenates everything after the host into one
+    string and hands it to the remote shell, which re-splits it. Passing argv straight through
+    therefore loses every quote, and
+    `["bash", "-lc", "ls -t /root/ice-state/cases/case-*.json | head -20"]` arrived as
+    `bash -lc ls -t ... | head -20` -- a bare `ls` of the home directory, with the rest as
+    positional parameters. The recorder then waited out a full 900-second investigation reporting
+    "NO case" while ICE had detected and remediated the attack, and copied whatever `ls` had
+    listed in /root into the bundle. shlex.join is what makes the remote shell rebuild this argv.
+    """
+    cmd = ["ssh", *_ssh_base(), "root@127.0.0.1", shlex.join(argv)]
     p = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(f"ssh {argv[:2]} failed rc={p.returncode}: {p.stderr.strip()[:300]}")
