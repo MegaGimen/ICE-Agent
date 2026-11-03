@@ -297,7 +297,20 @@ class Orchestrator:
         meta["knowledge"] = [n.split(" ", 2)[1] for n in knowledge]
         self.rt.audit.write("case.open", case=case_id, escalations=len(escalated))
         reply = agent.wake(case_id, msg)
-        case, assessment = build_case(case_id, host, reply.text, [r.entry.to_dict() for r in escalated])
+        triggers = [r.entry.to_dict() for r in escalated]
+        case, assessment = build_case(case_id, host, reply.text, triggers)
+        if assessment is None and (reply.text or "").strip():
+            # The agent investigated but wrote prose: re-ask for the same content as one constrained
+            # JSON call (the agentic loop itself cannot use response_format, it needs tool calls).
+            # Only runs when build_case found nothing, so a compliant model costs nothing extra.
+            from ice.daemon.investigate import extract
+            repaired = extract.to_case_json(reply.text)
+            if repaired:
+                case2, assessment2 = build_case(case_id, host, repaired, triggers, created=case.created)
+                if assessment2 is not None:
+                    case2.reason = case2.reason or case.reason
+                    case, assessment = case2, assessment2
+                    case.add_timeline("structured case recovered from prose by constrained-JSON extraction")
         if not reply.ok:
             case.add_timeline(f"agent error: {reply.error}")
         assessment = self._apply_gate_floor(case, assessment, escalated)

@@ -148,7 +148,7 @@ target containers, iptables containment scenarios and systemd service scenarios 
 ## Backends
 | role | backend | note |
 |---|---|---|
-| agent (investigation policy) | Alibaba Model Studio **Token Plan**, `qwen3.6-flash`, OpenAI-compatible | per-request billing, so `cost: 0` per call |
+| agent (investigation policy) | Alibaba Model Studio **Token Plan**, `qwen3.6-flash`, OpenAI-compatible | Credits are deducted by **token consumption**, not per call (that is Coding Plan). OpenClaw's `cost: 0` only means it does not know the price. |
 | decision model (detect gate + Jev score) | **TypeSafe Jev**, `https://api.typesafe.ai`, `jev-latest` | `KevClient` talks to it unchanged once `KEV_MODEL` is set |
 | reward judge | `qwen3.6-flash` (same Token Plan) | `ice/exercise/evaluate.py` |
 | embedding + ATT&CK KB (356 techniques) | bge-m3 on this box's CPU | `/root/ice_models`, `ice-data/kb/attack.jsonl` |
@@ -195,3 +195,33 @@ orchestrator does **not** fold into one case — six extra full agent runs per c
   command line containing the literal `ice.daemon.main` matches `pgrep -f 'ice[.]daemon[.]main'`, so
   `| xargs kill` kills the session that is about to start the daemon. Daemon restarts go through
   `/root/ice_daemon_restart.sh` for exactly this reason.
+
+## Corrections worth keeping
+Two things I had wrong, both found by questioning rather than by a failure:
+
+**The model's limits were guessed, and guessed badly.** I declared `contextWindow: 131072` and
+`maxTokens: 40960` for `qwen3.6-flash`. The real figures are a **1,000,000-token context**
+(983,616 max input in thinking mode) and **65,536 max output**, with a 131,072 chain-of-thought
+budget. OpenClaw uses `contextWindow` to budget and to decide when to compact, so declaring 1/7.6
+of the real window makes it trim the conversation far earlier than necessary — plausibly dropping
+the part that carried ICE's output contract. The first flash episode produced a good tool-using
+investigation, then wrote it up as markdown with no JSON and degenerated into a repeated paragraph,
+and I attributed that to the model. That attribution was premature: it is at least as likely to have
+been this misconfiguration. Always read the model page before declaring limits.
+
+**Token Plan is metered by tokens, not by calls.** Token Plan deducts Credits against token
+consumption (input, output, tool calls and context caching all converted); Coding Plan is the one
+with a fixed monthly fee and a per-call quota plus 5-hourly rate limits. An earlier cost estimate
+here assumed per-call billing and was therefore wrong for this plan. Measured burn for one complete
+successful episode: **`totalTokens` 37,332** (qwen3.8-max) — far below a naive estimate from the
+local-model runs, because the hosted endpoint caches context. Credits-per-token conversion is not
+documented here; take it from the console before projecting a campaign.
+
+## Constrained-JSON recovery
+`ice/daemon/investigate/extract.py` handles the prose-instead-of-JSON failure generally. The agentic
+loop cannot use `response_format` because the model has to emit tool calls, so the fix is a separate
+short call on the finished report with `response_format={"type":"json_object"}`, which this endpoint
+honours (`json_schema` with `strict` works too — both verified). The orchestrator invokes it only
+when `build_case` found no JSON, so a compliant model costs nothing extra. Flash emits valid JSON
+in that isolated call even unconstrained (fenced, which `extract_json` already parses), so the
+capability was never the issue.
