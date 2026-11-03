@@ -64,7 +64,10 @@ BASELINE_PATHS = [
 ]
 # Docker bind-mounts /etc/hosts, /etc/hostname and /etc/resolv.conf, and tar cannot replace a bind
 # mount ("Cannot open: File exists"). They are skipped automatically by _snapshot_paths().
-SCRATCH = ["tmp", "var/tmp"]
+# Volatile roots: not worth restoring byte-for-byte, but worth *listing*, so a deletion under them
+# can be ruled on. /var/mail and /var/spool/mail are here because `userdel -r` deletes a user's mail
+# spool, and nothing else records that those paths existed.
+SCRATCH = ["tmp", "var/tmp", "var/mail", "var/spool/mail"]
 BASELINE_TAR = RIG / "baseline.tar.gz"
 SCRATCH_MANIFEST = RIG / "scratch-manifest.txt"
 INVESTIGATE_TIMEOUT = float(os.environ.get("ICE_RECORD_TIMEOUT", "900"))
@@ -104,23 +107,44 @@ def _snapshot_paths() -> List[str]:
     return out
 
 
+SCRATCH_DEPTH = 3
+
+
+def write_scratch_manifest() -> int:
+    """List the volatile roots of the clean machine. Reset deletes whatever is not in here, and
+    verification reads it as existence evidence for paths no other source records."""
+    RIG.mkdir(parents=True, exist_ok=True)
+    with SCRATCH_MANIFEST.open("w") as fh:
+        for d in SCRATCH:
+            cmd = f"find /{d} -mindepth 1 -maxdepth {SCRATCH_DEPTH} 2>/dev/null"
+            for line in sh(cmd).stdout.splitlines():
+                fh.write(line + "\n")
+    n = sum(1 for _ in SCRATCH_MANIFEST.open())
+    print(f">>> scratch manifest {SCRATCH_MANIFEST}: {n} entries over {SCRATCH}")
+    return n
+
+
 def snapshot() -> None:
     """Capture the pristine machine. Run once, on a box with no scenario residue."""
     RIG.mkdir(parents=True, exist_ok=True)
     present = _snapshot_paths()
     sh(f"tar -czf {BASELINE_TAR} -C / " + " ".join(present), "snapshot", check=True)
-    with SCRATCH_MANIFEST.open("w") as fh:
-        for d in SCRATCH:
-            for line in sh(f"find /{d} -mindepth 1 -maxdepth 3 2>/dev/null").stdout.splitlines():
-                fh.write(line + "\n")
+    n = write_scratch_manifest()
     print(f">>> baseline {BASELINE_TAR} ({BASELINE_TAR.stat().st_size} bytes), "
-          f"{len(present)} paths, scratch manifest {sum(1 for _ in SCRATCH_MANIFEST.open())} entries")
+          f"{len(present)} paths, scratch manifest {n} entries")
 
 
 def _restore_scratch() -> None:
     keep = {l.strip() for l in SCRATCH_MANIFEST.open()} if SCRATCH_MANIFEST.exists() else set()
+    # A stale manifest would be read as proof that a path existed on the clean machine, so an entry
+    # that is simply gone turns into phantom damage. 20 of this box's 573 entries carry a
+    # boot-specific id (systemd-private-<random>), which is exactly what a reboot invalidates.
+    stale = [k for k in keep if not Path(k).exists()]
+    if stale:
+        print(f"  [scratch] {len(stale)} manifest entries no longer exist "
+              f"(e.g. {stale[0]}); refresh with `record.py manifest` or they read as damage")
     for d in SCRATCH:
-        for line in sh(f"find /{d} -mindepth 1 -maxdepth 3 2>/dev/null").stdout.splitlines():
+        for line in sh(f"find /{d} -mindepth 1 -maxdepth {SCRATCH_DEPTH} 2>/dev/null").stdout.splitlines():
             if line.strip() and line.strip() not in keep:
                 sh(f"rm -rf -- {json.dumps(line.strip())}")
 
@@ -389,10 +413,14 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     commands, refused = ct.executed_commands(audit), ct.refused_commands(audit)
     lens = _lens_paths(snaps["t0"])
     judgement = evaluate.judge_commands(d, commands, refused, trajectory)
+    # The scratch manifest is the only record of /tmp and /var/tmp -- they are in neither the
+    # tarball nor any osquery table, so without it a deletion there cannot be ruled on either way.
+    scratch = ct.Scratch(SCRATCH_MANIFEST, roots=["/" + d for d in SCRATCH], depth=SCRATCH_DEPTH)
     checked = ct.verify_paths(judgement.get("paths_to_check") or [], BASELINE_TAR, lens,
-                              t0=snaps["t0"], t1=snaps["t1"])
+                              t0=snaps["t0"], t1=snaps["t1"], scratch=scratch)
     trace = {"executed": commands, "refused": refused, "judgement": judgement,
-             "verified": checked, "snapshot_lens_size": len(lens)}
+             "verified": checked, "snapshot_lens_size": len(lens),
+             "scratch_manifest_size": len(scratch.paths)}
     (ep_dir / "command-trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1))
 
     out = sr.reward(d, judgement)
@@ -516,12 +544,18 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="ICE trajectory dataset recorder")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("snapshot", help="capture the pristine baseline (run on a clean box)")
+    sub.add_parser("manifest", help="refresh only the scratch manifest, leaving the tarball alone")
     r = sub.add_parser("run", help="record episodes")
     r.add_argument("scenario", choices=sorted(SCENARIOS))
     r.add_argument("--episodes", type=int, default=1)
     a = ap.parse_args()
     if a.cmd == "snapshot":
         snapshot()
+        return
+    if a.cmd == "manifest":
+        # Separate from `snapshot` on purpose: widening the listed roots must not silently rewrite
+        # the tarball, which is what defines the healthy bytes every episode is scored against.
+        write_scratch_manifest()
         return
     if os.environ.get("ICE_RECORD_MODE") != "1":
         raise SystemExit("set the recording posture first: source ice/serving/record_env.sh")

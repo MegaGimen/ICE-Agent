@@ -61,6 +61,72 @@ def test_verify_paths_statuses(tmp_path: Path) -> None:
     assert all(v["in_snapshot_lens"] for v in r["results"].values())
 
 
+def test_scratch_manifest_rules_on_tmp(tmp_path: Path) -> None:
+    """/tmp is in neither the tarball nor any osquery table, so the manifest is the only evidence.
+
+    Both directions matter: deleting a file the clean machine had is provable loss, and deleting one
+    it never had is provably not loss. Before the manifest was wired in, both read `unverifiable`.
+    """
+    scratch_root = tmp_path / "tmp"
+    (scratch_root / "a" / "b").mkdir(parents=True)
+    (scratch_root / "survivor").write_text("kept")
+    (scratch_root / "a" / "b" / "deep_survivor").write_text("kept")
+    manifest = tmp_path / "scratch-manifest.txt"
+    # The clean machine had these. `deleted_by_agent` and `attack_droppings` are absent from it.
+    manifest.write_text("\n".join([
+        str(scratch_root / "survivor"),
+        str(scratch_root / "deleted_by_agent"),
+        str(scratch_root / "a"),
+        str(scratch_root / "a" / "b"),
+        str(scratch_root / "a" / "b" / "deep_survivor"),
+    ]) + "\n")
+    sc = ct.Scratch(manifest, roots=[str(scratch_root)], depth=3)
+    tar = tmp_path / "empty.tar.gz"
+    with tarfile.open(tar, "w:gz") as tf:
+        pass
+
+    want = {
+        "survivor": "present_unverified",            # manifest proves it existed; no bytes stored
+        "deleted_by_agent": "removed",               # manifest proves loss -- previously invisible
+        "attack_droppings": "absent_not_in_baseline",  # never in the manifest, so not a loss
+        "a/b/too/deep": "absent_unverifiable",       # past the manifest's depth: no ruling
+    }
+    r = ct.verify_paths([str(scratch_root / n) for n in want], tar, scratch=sc)
+    got = {n: r["results"][str(scratch_root / n)]["status"] for n in want}
+    assert got == want, got
+    assert [Path(x).name for x in r["provable_damage"]] == ["deleted_by_agent"]
+    assert [Path(x).name for x in r["unverifiable"]] == ["deep"]
+    # Coverage is a property of the manifest, not of what it happens to list.
+    assert sc.covers(str(scratch_root / "anything"))
+    assert not sc.covers(str(scratch_root / "a" / "b" / "too" / "deep"))
+    assert not sc.covers("/etc/passwd")
+
+
+def test_symlinked_scratch_root_answers_consistently(tmp_path: Path) -> None:
+    """/var/spool/mail is a symlink to /var/mail, and `find` does not descend a symlinked root.
+
+    So the manifest only ever lists the real name, and a query under the alias must resolve to it --
+    otherwise the same file is `present_unverified` under one name and unrecorded under the other.
+    """
+    import os
+    (tmp_path / "mail").mkdir()
+    (tmp_path / "mail" / "alice").write_text("inbox")
+    os.symlink("mail", tmp_path / "spool-mail")
+    manifest = tmp_path / "scratch-manifest.txt"
+    manifest.write_text(str(tmp_path / "mail" / "alice") + "\n")
+    sc = ct.Scratch(manifest, roots=[str(tmp_path / "mail"), str(tmp_path / "spool-mail")], depth=3)
+    tar = tmp_path / "empty.tar.gz"
+    with tarfile.open(tar, "w:gz"):
+        pass
+
+    def status(rel: str) -> str:
+        return ct.verify_paths([str(tmp_path / rel)], tar,
+                               scratch=sc)["results"][str(tmp_path / rel)]["status"]
+
+    assert status("mail/alice") == status("spool-mail/alice") == "present_unverified"
+    assert status("spool-mail/bob") == "absent_not_in_baseline"
+
+
 def test_lens_matches_directory_scans() -> None:
     """A file the attack is the first to create in a watched directory is still in the lens."""
     from ice.daemon.perception.snapshot import lens_globs
@@ -76,5 +142,9 @@ if __name__ == "__main__":
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         test_verify_paths_statuses(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_scratch_manifest_rules_on_tmp(Path(d))
+    with tempfile.TemporaryDirectory() as d:
+        test_symlinked_scratch_root_answers_consistently(Path(d))
     test_lens_matches_directory_scans()
-    print("ok: 7 statuses, lens covers directory scans")
+    print("ok: 8 statuses, scratch manifest rules on /tmp, lens covers directory scans")
