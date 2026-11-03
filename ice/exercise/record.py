@@ -516,6 +516,11 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
     else:
         print("  NO case within timeout")
     image.take(images["final"])
+    # Stop the daemon before scoring. Left running it keeps acting on a machine that is already
+    # measured and about to be reset, and its actions land outside every episode's window -- after
+    # one episode it classified the sustained outbound HTTPS to the model relay as C2 and blackholed
+    # the address that serves both the investigating agent and the judge.
+    stop_daemon()
     meta = export(DATASET / ep, scenario, case, armed, images)
     if dirty:
         meta["reset_residue"] = dirty
