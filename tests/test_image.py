@@ -202,6 +202,9 @@ def test_file_score_separates_the_attack_from_the_agent(tmp_path: Path) -> None:
     assert sorted(sc["cleared"]) == ["/etc/cron.d/evil", "/etc/passwd"]
     assert sc["not_cleared"] == {}
     assert list(sc["collateral"]) == ["/etc/legal"]          # untouched by the attack, gone now
+    # /etc/shadow- is rewritten by any legitimate account change and is *supposed* to still name a
+    # deleted user, so it is not damage. Counting these four took a correct episode from 1.0 to 0.0.
+    assert sr.volatile("/etc/shadow-") and not sr.volatile("/etc/shadow")
     assert sc["side_effects"] == ["/quarantine/evil.bak"]    # new, and not the attack's doing
 
     r = sr.reward(sc)
