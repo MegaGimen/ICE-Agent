@@ -75,12 +75,20 @@ BOOT_TIMEOUT = float(os.environ.get("ICE_VM_BOOT_TIMEOUT", "240"))
 # "Connection timed out during banner exchange" -- which is what sshd says once MaxStartups
 # (10:30:100 by default) starts refusing. Sharing a connection removes the churn rather than
 # raising the guest's limit to tolerate it.
+# A probe has to outlast the connect timeout, or it reports a machine down that was only slow to
+# answer: raising ConnectTimeout to 10 while wait_for_ssh still gave the probe 8 seconds made every
+# boot fail. Anything that asks "is it up" waits PROBE_TIMEOUT, which is derived rather than typed.
+CONNECT_TIMEOUT = int(os.environ.get("ICE_VM_CONNECT_TIMEOUT", "10"))
+PROBE_TIMEOUT = CONNECT_TIMEOUT + 10
+
+
 def _ctl(label: str = "") -> str:
     return str(VM_DIR / f".ssh-{label or 'vm'}.sock")
 
 
 _SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-             "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+             "-o", f"ConnectTimeout={CONNECT_TIMEOUT}",
+             "-o", "LogLevel=ERROR",
              "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
              "-o", "ControlMaster=auto", "-o", "ControlPersist=120"]
 
@@ -283,13 +291,14 @@ def boot(label: str, wait: bool = True) -> None:
 
 def alive(label: str) -> bool:
     """Is this VM both running and answering ssh?"""
-    return running(label) and ssh(["true"], check=False, timeout=10).returncode == 0
+    return running(label) and ssh(["true"], check=False,
+                                  timeout=PROBE_TIMEOUT).returncode == 0
 
 
 def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
     t0 = time.time()
     while time.time() - t0 < timeout:
-        if ssh(["true"], check=False, timeout=8).returncode == 0:
+        if ssh(["true"], check=False, timeout=PROBE_TIMEOUT).returncode == 0:
             print(f"  [boot {label}] ssh up after {time.time() - t0:.0f}s")
             return
         if not running(label):
