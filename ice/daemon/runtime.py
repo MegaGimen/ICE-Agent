@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ice.daemon import config as cfg
 from ice.daemon.audit import AuditLog
 from ice.daemon.safety.approval import ApprovalPolicy, ApprovalStore
+from ice.daemon import selfaware
 from ice.daemon.safety.gate import SafetyGate, SafetyPolicy, configure_safety_gate, judge_score_provider
 
 log = logging.getLogger("ice.runtime")
@@ -122,7 +123,11 @@ class Runtime:
         policy = SafetyPolicy(
             authorized_targets=(self.conf.hostname,),
             bound_target=self.conf.hostname,          # host_exec always runs on this host
-            critical_assets=self.conf.critical_assets,
+            # ICE's own footprint is merged in rather than configured: the gate matches critical
+            # assets against every argument of a command, so naming the address its model answers
+            # on is what turns `iptables -I OUTPUT -d <that address> -j DROP` into a refusal. It ran
+            # that command twice, auto-approved, and cut off its own investigation both times.
+            critical_assets=tuple(sorted(set(self.conf.critical_assets) | set(selfaware.assets()))),
             deny_critical_assets=deny_critical,
         )
         # Dataset recording (ICE_RECORD_MODE=1): Kev must not reject an action mid-trajectory. Without a

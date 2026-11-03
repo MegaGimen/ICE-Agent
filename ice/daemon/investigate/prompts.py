@@ -25,11 +25,11 @@ Rules:
    - A harmless-looking payload does not make persistence harmless. A new scheduled job, account, credential, key or autostart entry is a foothold whose payload can be changed at any time. Report what it grants, not only what it currently runs.
    - "A privileged user did it with sudo" is not proof of authorization: stolen or abused admin credentials (T1078) leave exactly these logs, and so does an attacker who already has root. The actor is context, not a verdict. Only tie a change to legitimate maintenance when the evidence shows it: a matching package-manager transaction (dpkg/apt logs), a configuration-management run, or an ICE component listed below.
 4. A single weak signal can be one step of a chain: look for related changes (who created it, what else that process or user did, network connections, files) before concluding.
-5. proposed_actions are remediation only — commands that remove or contain the threat. Verification ("confirm the file is gone", "list the directory") belongs in the investigation, done with host_query, never in proposed_actions; if nothing needs undoing, leave the list empty. Each action must be the exact full command to run on this host, with all its arguments inside `command` (`targets` only names the affected objects), one program with arguments per action — no shell pipes, redirections (`>`), `&&`, `;`, backticks, or `$` expansion: they run without a shell. Prefer the smallest reversible action that removes the threat. Good forms: `crontab -r -u <user>`, `rm -f <path>`, `sed -i '/<unique text>/d' <file>`, `userdel <user>`, `gpasswd -d <user> sudo`, `systemctl disable --now <unit>`, `kill <pid>`, `iptables -I OUTPUT -d <ip> -j DROP`, `iptables -I INPUT -s <ip> -j DROP`.
+5. proposed_actions are remediation only — commands that remove or contain the threat. Verification ("confirm the file is gone", "list the directory") belongs in the investigation, done with host_query, never in proposed_actions; if nothing needs undoing, leave the list empty. Each action must be the exact full command to run on this host, with all its arguments inside `command` (`targets` only names the affected objects), one program with arguments per action — no shell pipes, redirections (`>`), `&&`, `;`, backticks, or `$` expansion: they run without a shell. Prefer the smallest reversible action that removes the threat. Good forms: `crontab -r -u <user>`, `rm -f <path>`, `sed -i '/<unique text>/d' <file>`, `userdel <user>`, `gpasswd -d <user> sudo`, `systemctl disable --now <unit>`, `kill <pid>`, `iptables -I OUTPUT -d <ip> -j DROP`, `iptables -I INPUT -s <ip> -j DROP`. Before proposing `kill` or an `iptables` rule, check the target against ICE's own components listed below: an address ICE's own model answers on is not a C2 server, and blocking it ends this investigation.
 6. Separate facts from hypotheses. State only what the event or tool output shows. Never name an initial access vector (web exploit, SSH, phishing, ...) unless a tool result shows it; otherwise write "initial access: unknown". The same goes for timestamps and files not in the evidence. If an object from the event is no longer present on the host, say so (it may have been removed, or the event may be stale).
 7. Budget: at most 8 tool calls; the server stops answering after 12. Prefer one JOINed query over several small ones; if a query errors, fix it once using the schema notes below rather than exploring.
 
-These are ICE's own components, not attack evidence, and must never be targeted: nginx on 172.18.0.1:8443 (ICE MCP TLS proxy), the ICE MCP server on 127.0.0.1:8083, vLLM on :8000, Kev on :8010, the OpenShell gateway on :8080 and the openshell-docker bridge 172.18.0.0/16, osquery, and anything under /home/dell/ICE, /home/dell/ice-envs, /home/dell/ice_models, /home/dell/NemoClaw.
+{own_components}
 
 osquery schema notes (Linux, osquery 5):
 - crontab(event, minute, hour, day_of_month, month, day_of_week, command, path) — no user column; the owner of a user crontab is the file name in path /var/spool/cron/crontabs/<user>.
@@ -67,8 +67,16 @@ Correlation graph schema (Cypher, read-only; one MATCH/RETURN statement, no writ
 
 
 def role(graph_available: bool = False) -> str:
+    """The system prompt, with ICE's own footprint filled in from the live configuration.
+
+    That paragraph used to be written by hand and had gone stale: it named an nginx proxy, a vLLM
+    server and paths under /home/dell that exist nowhere in this deployment, and it never mentioned
+    the model endpoints -- which is what ICE went on to blackhole, twice, mid-investigation.
+    """
+    from ice.daemon import selfaware
     return (ROLE
             .replace("{graph_tool}", " and ice-host__graph_query (correlation graph of past cases)" if graph_available else "")
+            .replace("{own_components}", selfaware.describe())
             .replace("{graph_schema}", GRAPH_SCHEMA if graph_available else ""))
 
 
