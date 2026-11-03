@@ -65,11 +65,30 @@ def post_state(scenario: Scenario, baseline_tar: Path) -> Dict[str, Any]:
     """Compare the live machine with the pristine baseline, and look for scenario markers."""
     base = _baseline_files(baseline_tar)
     live: Dict[str, str] = {}
-    roots = sorted({p.rsplit("/", 1)[0] for p in base})
+    # Walk exactly what the snapshot declared, not the parent directories of the captured files:
+    # /etc/passwd's parent is /etc, so deriving roots from parents walked the whole of /etc and
+    # reported every unrelated file in it as "added" (810 of them).
+    from ice.exercise.record import BASELINE_PATHS
+    roots = []
+    for rel in BASELINE_PATHS:
+        p = Path("/", rel)
+        if p.is_symlink() or not p.exists():
+            continue
+        if p.is_file():
+            d = _digest(p)
+            if d is not None:
+                live[str(p)] = d
+        elif p.is_dir():
+            roots.append(str(p))
     for root in roots:
-        for dirpath, _dirnames, filenames in os.walk(root):
+        # followlinks=False and the islink() skip keep this like-for-like with the baseline: tar's
+        # isfile() excludes symlinks, and /etc/systemd/system is mostly .wants symlinks, so counting
+        # them on the live side alone reported ~1500 phantom "added" files.
+        for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
             for fn in filenames:
                 fp = Path(dirpath, fn)
+                if fp.is_symlink():
+                    continue
                 d = _digest(fp)
                 if d is not None:
                     live[str(fp)] = d
