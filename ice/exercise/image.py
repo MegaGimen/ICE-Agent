@@ -71,12 +71,27 @@ def _run(cmd: List[str], label: str = "") -> subprocess.CompletedProcess:
     return p
 
 
+def taken_at(label: str) -> float:
+    """When a snapshot was taken, from the sidecar metadata rather than the directory's mtime.
+
+    `rsync -a` copies the source's timestamps, so a snapshot directory carries the mtime of `/`,
+    not the moment it was made. Ordering by that put a later snapshot first, which made `take`
+    hardlink against an older one than it should and reported each snapshot's size wrongly.
+    """
+    try:
+        return float(json.loads((SNAP_ROOT / f"{label}.meta.json").read_text())["taken"])
+    except (OSError, KeyError, ValueError):
+        try:
+            return (SNAP_ROOT / label).stat().st_mtime
+        except OSError:
+            return 0.0
+
+
 def snapshots() -> List[str]:
-    """Snapshot labels, oldest first by mtime."""
+    """Snapshot labels, oldest first."""
     if not SNAP_ROOT.exists():
         return []
-    return [p.name for p in sorted((d for d in SNAP_ROOT.iterdir() if d.is_dir()),
-                                   key=lambda d: d.stat().st_mtime)]
+    return sorted((d.name for d in SNAP_ROOT.iterdir() if d.is_dir()), key=taken_at)
 
 
 def take(label: str, link_from: Optional[str] = None) -> Dict[str, Any]:
@@ -303,7 +318,7 @@ def main() -> None:
                 sizes[Path(path.strip()).name] = kb.strip()
         for label in labels:
             d_ = SNAP_ROOT / label
-            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(d_.stat().st_mtime))
+            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(taken_at(label)))
             print(f"  {label:<12} {sizes.get(label, '?'):>7} new   {when}")
         if dirs:
             print(f"  {'(store)':<12} {_run(['du', '-sh', str(SNAP_ROOT)]).stdout.split(chr(9))[0]:>7} total")
