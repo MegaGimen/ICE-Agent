@@ -69,8 +69,36 @@ MEM_MB = int(os.environ.get("ICE_VM_MEM", "4096"))
 CPUS = int(os.environ.get("ICE_VM_CPUS", "4"))
 BOOT_TIMEOUT = float(os.environ.get("ICE_VM_BOOT_TIMEOUT", "240"))
 
+# One multiplexed connection per VM instead of one per call. Waiting for a case opens an ssh every
+# few seconds for up to fifteen minutes, and the episode that lost its target failed with
+# "Connection timed out during banner exchange" -- which is what sshd says once MaxStartups
+# (10:30:100 by default) starts refusing. Sharing a connection removes the churn rather than
+# raising the guest's limit to tolerate it.
+def _ctl(label: str = "") -> str:
+    return str(VM_DIR / f".ssh-{label or 'vm'}.sock")
+
+
 _SSH_OPTS = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-             "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=5"]
+             "-o", "LogLevel=ERROR", "-o", "ConnectTimeout=10",
+             "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4",
+             "-o", "ControlMaster=auto", "-o", "ControlPersist=120"]
+
+
+def _ssh_base(label: str = "") -> List[str]:
+    return ["-i", str(KEY), "-p", str(ssh_port(label)), *_SSH_OPTS,
+            "-o", f"ControlPath={_ctl(label or _current_label())}"]
+
+
+def _current_label() -> str:
+    return next(iter(_PORT), "vm")
+
+
+def close_connection(label: str = "") -> None:
+    """Drop the shared connection, so a VM that is being shut down does not leave it dangling."""
+    name = label or _current_label()
+    subprocess.run(["ssh", *_ssh_base(name), "-O", "exit", "root@127.0.0.1"],
+                   capture_output=True)
+    Path(_ctl(name)).unlink(missing_ok=True)
 
 
 def _run(cmd: List[str], label: str = "", check: bool = True,
@@ -272,7 +300,7 @@ def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
 def ssh(argv: List[str], check: bool = True, timeout: Optional[float] = 300,
         capture: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the VM. argv is passed through, not shell-joined by us."""
-    cmd = ["ssh", "-i", str(KEY), "-p", str(ssh_port()), *_SSH_OPTS, "root@127.0.0.1", *argv]
+    cmd = ["ssh", *_ssh_base(), "root@127.0.0.1", *argv]
     p = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(f"ssh {argv[:2]} failed rc={p.returncode}: {p.stderr.strip()[:300]}")
@@ -298,8 +326,7 @@ def run_script(body: str, label: str = "", check: bool = True,
     Quoting a snippet through ssh, python's argv and the guest's bash in turn is how a useradd call
     arrived with its arguments mangled; stdin has no quoting layer to get wrong.
     """
-    cmd = ["ssh", "-i", str(KEY), "-p", str(ssh_port()), *_SSH_OPTS, "root@127.0.0.1",
-           "bash", "-s"]
+    cmd = ["ssh", *_ssh_base(), "root@127.0.0.1", "bash", "-s"]
     p = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=timeout)
     if label:
         tag = "ok" if p.returncode == 0 else f"rc={p.returncode} {(p.stderr or p.stdout).strip()[:140]}"
@@ -311,11 +338,13 @@ def run_script(body: str, label: str = "", check: bool = True,
 
 def put(local: Path, remote: str) -> None:
     _run(["scp", "-q", "-i", str(KEY), "-P", str(ssh_port()), *_SSH_OPTS,
+          "-o", f"ControlPath={_ctl(_current_label())}",
           str(local), f"root@127.0.0.1:{remote}"])
 
 
 def get(remote: str, local: Path) -> bool:
     p = _run(["scp", "-q", "-i", str(KEY), "-P", str(ssh_port()), *_SSH_OPTS,
+              "-o", f"ControlPath={_ctl(_current_label())}",
               f"root@127.0.0.1:{remote}", str(local)], check=False)
     return p.returncode == 0
 
@@ -323,8 +352,10 @@ def get(remote: str, local: Path) -> bool:
 def shutdown(label: str, timeout: float = 120) -> None:
     """Shut the VM down cleanly, so the disk is consistent before it is snapshotted."""
     if not running(label):
+        close_connection(label)
         return
     ssh(["systemctl", "poweroff", "--no-block"], check=False, timeout=15)
+    close_connection(label)
     t0 = time.time()
     while time.time() - t0 < timeout:
         if not running(label):

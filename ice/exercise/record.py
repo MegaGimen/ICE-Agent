@@ -269,7 +269,7 @@ def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[
                     f"(console: {vm.VM_DIR}/{live}.console.log)")
             print(f"  [wait] no answer from the target ({misses}/5): "
                   f"{(listing.stderr or '').strip()[:90]}")
-            time.sleep(10)
+            time.sleep(15)
             continue
         misses = 0
         for path in listing.stdout.split():
@@ -280,7 +280,7 @@ def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[
                             for t in d.get("triggers", []))
             if any(m in trig for m in markers):
                 return d
-        time.sleep(5)
+        time.sleep(15)
     return None
 
 
