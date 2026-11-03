@@ -1,20 +1,26 @@
-"""Diffing and reading two whole-filesystem snapshots, on synthetic trees.
+"""Diffing and reading two snapshots of an episode's machine, on synthetic trees.
 
     python3 -m pytest tests/test_image.py        (or run this file directly)
 
+In the rig a snapshot is a qcow2 overlay the host mounts read-only, which yields a directory tree.
+These tests supply the trees directly and substitute `image.root`, so the comparison logic is
+covered without needing qemu, kvm or a 4 GB image to boot.
+
 Everything here was a real bug or a real requirement:
-  * directories cannot be hardlinked, so comparing them by inode called all 21,054 directories on
-    the box modified;
-  * `rsync -a` copies the source's timestamps, so a snapshot's mtime is the source's, not its own;
-  * a deleted file has a diff but no present-day existence, so the change list is the union of
-    before and after with `exists_now` read off the live machine;
-  * binary files are a change like any other, as in git, not a path quietly dropped.
+  * two snapshots of one machine give a directory different inodes, so comparing directories by
+    inode once reported all 21,054 directories on the box as modified;
+  * a deleted file has a diff but nothing left to look at, so the change list is the union of before
+    and after, with `exists_now` answered separately;
+  * binary files are a change like any other, as in git, not a path quietly dropped;
+  * the attack's own footprint is derived from the armed snapshot, so it is never charged to the
+    agent, and the judge and the arithmetic are unioned so neither can hide what the other saw.
 """
 from __future__ import annotations
 
 import json
 import os
 import sys
+import tarfile  # noqa: F401 - kept for ad-hoc fixtures
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -34,17 +40,25 @@ def _tree(root: Path, files: dict) -> None:
             fp.write_text(content)
 
 
-def _snapshots(tmp_path: Path, before: dict, after: dict, link: bool = True) -> None:
-    """Build two snapshot trees and point the module at them.
+def _use(tmp_path: Path, labels) -> None:
+    """Serve these labels from directories under tmp_path instead of mounting a disk image."""
+    roots = {label: tmp_path / label for label in labels}
+    for d in roots.values():
+        d.mkdir(parents=True, exist_ok=True)
+    image.root = lambda label: roots[label]                      # type: ignore[assignment]
+    image.exists_now = lambda path, fallback: (                   # type: ignore[assignment]
+        (roots[fallback] / path.lstrip("/")).exists(), f"snapshot:{fallback}")
 
-    With link=True, files identical in both are hardlinked, as --link-dest does on the real thing,
-    so the inode fast path is exercised. link=False is for the cases that need two distinct inodes
-    with the same content -- a hardlink shares one timestamp, so touching "the B copy" of a linked
-    file changes both and there is no mtime difference left to test.
+
+def _snapshots(tmp_path: Path, before: dict, after: dict, link: bool = True) -> None:
+    """Build two snapshot trees, A and B, and serve them as labels.
+
+    With link=True, files identical in both are hardlinked, so the inode fast path is exercised as
+    it is on a real overlay chain. link=False is for the cases that need two distinct inodes holding
+    the same content -- a hardlink shares one timestamp, so touching "the B copy" of a linked file
+    changes both and leaves no mtime difference to test.
     """
-    image.SNAP_ROOT = tmp_path
-    for label in ("A", "B"):
-        (tmp_path / label).mkdir(parents=True, exist_ok=True)
+    _use(tmp_path, ("A", "B"))
     _tree(tmp_path / "A", before)
     _tree(tmp_path / "B", after)
     if link:
@@ -53,9 +67,6 @@ def _snapshots(tmp_path: Path, before: dict, after: dict, link: bool = True) -> 
                 dst = tmp_path / "B" / rel
                 dst.unlink()
                 os.link(tmp_path / "A" / rel, dst)
-    for label in ("A", "B"):
-        (tmp_path / f"{label}.meta.json").write_text(json.dumps(
-            {"label": label, "taken": 100.0 if label == "A" else 200.0}))
 
 
 def test_diff_classifies_each_kind_of_change(tmp_path: Path) -> None:
@@ -139,27 +150,18 @@ def test_show_handles_a_deletion_and_an_absent_path(tmp_path: Path) -> None:
     assert image.show("A", "B", "/never")["status"] == "absent from both"
 
 
-def test_content_reads_either_snapshot_or_the_live_machine(tmp_path: Path) -> None:
+def test_content_reads_either_snapshot(tmp_path: Path) -> None:
     _snapshots(tmp_path, {"gone.txt": "the before bytes\n"}, {})
+    from ice.exercise import vm
+    vm.overlay_path = lambda label: tmp_path / label            # type: ignore[assignment]
     # The bytes of a deleted file are still available, without restoring anything.
     before = image.content("A", "/gone.txt")
     assert before["exists"] and before["text"] == "the before bytes\n"
     assert image.content("B", "/gone.txt") == {"path": "/gone.txt", "label": "B", "exists": False}
-    assert image.content("current", "/gone.txt")["exists"] is False
-    assert image.content("nope", "/gone.txt")["error"].startswith("no snapshot")
     # Truncation is stated rather than silently applied.
     capped = image.content("A", "/gone.txt", max_bytes=4)
     assert capped["truncated"] is True and capped["text"] == "the "
     assert capped["size"] == 17                      # the real size, not the truncated length
-
-
-def test_snapshots_are_ordered_by_when_they_were_taken(tmp_path: Path) -> None:
-    """rsync -a copies the source's timestamps, so directory mtime is not take order."""
-    _snapshots(tmp_path, {"a": "x"}, {"a": "x"})
-    os.utime(tmp_path / "A", (900, 900))             # make A look newer on disk than B
-    os.utime(tmp_path / "B", (800, 800))
-    assert image.snapshots() == ["A", "B"]
-    assert image.taken_at("A") == 100.0
 
 
 if __name__ == "__main__":
@@ -178,7 +180,6 @@ def test_file_score_separates_the_attack_from_the_agent(tmp_path: Path) -> None:
     """
     from ice.exercise import snapshot_reward as sr
 
-    image.SNAP_ROOT = tmp_path
     trees = {
         "S0": {"etc/passwd": "root\n", "etc/legal": "banner\n", "var/log/auth.log": "old\n"},
         "A1": {"etc/passwd": "root\nbutter\n", "etc/legal": "banner\n",
@@ -188,12 +189,12 @@ def test_file_score_separates_the_attack_from_the_agent(tmp_path: Path) -> None:
         "T2": {"etc/passwd": "root\n", "quarantine/evil.bak": "* * * * * root sh\n",
                "var/log/auth.log": "old\nuseradd\nuserdel\n"},
     }
+    _use(tmp_path, trees)
     for label, files in trees.items():
         for rel, content in files.items():
             fp = tmp_path / label / rel
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content)
-        (tmp_path / f"{label}.meta.json").write_text(json.dumps({"label": label, "taken": 1.0}))
 
     sc = sr.file_score("S0", "A1", "T2")
     # /var/log/auth.log records the attack's own useradd and can never be unwritten, so it is not

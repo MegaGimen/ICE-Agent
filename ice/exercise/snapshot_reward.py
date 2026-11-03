@@ -36,9 +36,18 @@ RUNTIME_TABLES = ("listening_ports", "autostart")
 
 # Paths that change on their own, or that only ever grow. Scoring them would make a perfect episode
 # unscorable: /var/log/auth.log records the attack's own useradd and cannot be unwritten.
+#
+# Measured rather than guessed. An episode that boots the target VM and changes nothing leaves 13
+# paths different out of 161,080, and every one is in here: six log files, a gzipped dmesg rotation,
+# grub's boot counter, systemd's random seed, the fsck-at-reboot stamp, the journal, and two lxd
+# sockets. The last group is the product's own state -- ICE's state directory and openclaw's cache
+# live on the machine under test by design, and their churn is not that machine's health. The repo
+# itself is deliberately not here: if an episode deleted ICE's code, that is worth seeing.
 VOLATILE_PREFIXES = (
-    "/var/log/", "/var/lib/landscape/", "/var/lib/update-notifier/", "/var/lib/systemd/",
-    "/var/cache/", "/tmp/openclaw/",
+    "/var/log/", "/var/cache/", "/var/lib/systemd/", "/var/lib/update-notifier/",
+    "/var/lib/landscape/", "/var/lib/cloud/", "/var/snap/", "/boot/grub/grubenv",
+    "/run/", "/tmp/openclaw/",
+    "/root/ice-state/", "/root/.openclaw/", "/root/.cache/", "/root/ice-build/",
 )
 
 # The shadow suite's backup files. Their whole job is to hold the previous content of their primary,

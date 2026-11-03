@@ -1,26 +1,29 @@
-"""Whole-filesystem content snapshots, so every file on the machine has a before and an after.
+"""Reading the machine an episode ran on, from snapshots of its disk.
 
-The point is to stop guessing where an episode might do damage. Earlier the evidence was three
-partial records -- a tarball of 19 declared paths, osquery's 177, and a filename listing of /tmp --
-and the set of paths they covered was chosen by looking at one attack. Anything outside it was
-invisible: a deletion there could be neither proven nor ruled out. Widening that set by hand, one
-observed attack at a time, is not a method.
+Each episode runs inside its own VM (ice.exercise.vm) and the host reads that VM's disk afterwards,
+so every file on the machine has a before and an after without anything being listed in advance.
 
-A watch list and an ignore list are not the same kind of thing. What this excludes is a short,
-checkable set of directories the rig itself writes -- the snapshot store, the dataset, the repo, the
-interpreter, the agent's install. Everything else on the machine is covered, so an unlisted path now
-shows up as a change rather than being silently unseen.
+This replaced an rsync copy of the host's own filesystem. That version needed an exclude list for
+the pseudo-filesystems and for everything the rig itself wrote, and the list was wrong twice: once
+when /root/ice-state was excluded after the baseline had already been taken, which reported its 15
+paths as deleted in every later episode, and once when the agent's own sqlite cache churned through
+8 of the 21 paths that changed while it worked. Neither can arise now -- the rig is outside the VM,
+and /proc, /sys, /dev and /run are mount points rather than files, so a disk image does not contain
+them at all.
 
-Snapshots are real content, not hashes, so the before-bytes of any file can be read back. Space is
-not the problem it sounds like: with --link-dest, a file that did not change is hardlinked to the
-previous snapshot rather than copied, so a second snapshot of a 17 GB machine costs only what
-actually changed. That same trick makes diffing almost free -- two entries sharing an inode are
-provably identical, so a full comparison reads no file contents at all.
+What still has to be ignored is the product's own state: ICE's state directory, openclaw's install.
+Those live on the machine under test by design and their churn is not that machine's health. That is
+a much smaller claim than the old list, and it belongs to scoring (snapshot_reward) rather than here.
 
-    python -m ice.exercise.image take S0
-    python -m ice.exercise.image diff S0 T2
-    python -m ice.exercise.image show S0 T2 /etc/crontab
-    python -m ice.exercise.image restore S0
+Snapshots are qcow2 overlays, so unchanged blocks are shared with the golden image rather than
+copied -- a snapshot of a 4 GB machine costs the few megabytes that really changed. Reading one is a
+read-only nbd mount, which yields an ordinary directory tree, so the comparison below and the three
+tools a judge drives it with are the same code they were when the trees came from rsync.
+
+    python -m ice.exercise.image changes base <episode>-final
+    python -m ice.exercise.image diff    base <episode>-final
+    python -m ice.exercise.image show    base <episode>-final /etc/crontab
+    python -m ice.exercise.image content base /etc/legal
 """
 from __future__ import annotations
 
@@ -29,100 +32,35 @@ import difflib
 import hashlib
 import json
 import os
-import subprocess
-import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
-SNAP_ROOT = Path(os.environ.get("ICE_IMAGE_ROOT", "/root/ice-images"))
-
-# Directories the rig itself owns. Restoring them would undo the recorder's own code and data, and
-# snapshotting them would make each snapshot contain the previous ones. `-x` keeps rsync on the root
-# filesystem, which already excludes /proc, /sys, /dev and /run.
-EXCLUDES: Tuple[str, ...] = (
-    # Pseudo-filesystems. `-x` already keeps rsync off them, on both sides, but --delete against an
-    # empty /run would take a running system apart if that ever stopped holding, and a guess is not
-    # worth it: these hold no episode evidence and must never be restored.
-    "/proc", "/sys", "/dev", "/run",
-    "/lost+found",
-    "/root/ice-images",          # the snapshot store (see SNAP_ROOT)
-    "/root/ice-dataset",         # recorded episodes
-    "/root/ICE",                 # this repository
-    "/root/ice-envs",            # the daemon's interpreter
-    "/root/node24",              # node, for the agent
-    "/root/.openclaw",           # the agent's own install and state
-    "/root/ice-build",           # daemon logs
-    "/root/ice-state",           # the daemon's own state dir, rebuilt every episode
-    "/root/.cache/openclaw",     # the agent's sqlite scratch; it churns on every run
-    "/root/ice-logs",            # where episode output goes, since restore would delete it
-)
+from typing import Any, Dict, List, Optional, Tuple
 
 
-def _excludes(extra: Iterable[str] = ()) -> List[str]:
-    out: List[str] = []
-    for e in tuple(EXCLUDES) + tuple(extra) + (str(SNAP_ROOT),):
-        out += ["--exclude", e]
-    return out
+def root(label: str) -> Path:
+    """Where this snapshot's filesystem can be read on the host; mounts it if it is not already."""
+    from ice.exercise import vm
+    return vm.mount(label)
 
 
-def _run(cmd: List[str], label: str = "") -> subprocess.CompletedProcess:
-    t0 = time.time()
-    p = subprocess.run(cmd, capture_output=True, text=True)
-    if label:
-        tag = "ok" if p.returncode == 0 else f"rc={p.returncode} {p.stderr.strip()[:200]}"
-        print(f"  [{label}] {tag} ({time.time() - t0:.1f}s)")
-    return p
+def release() -> None:
+    """Unmount everything. Safe to call more than once."""
+    from ice.exercise import vm
+    vm.umount_all()
 
 
-def taken_at(label: str) -> float:
-    """When a snapshot was taken, from the sidecar metadata rather than the directory's mtime.
+def exists_now(path: str, fallback: str) -> Tuple[bool, str]:
+    """Is this path on the machine at this moment, and what did we ask?
 
-    `rsync -a` copies the source's timestamps, so a snapshot directory carries the mtime of `/`,
-    not the moment it was made. Ordering by that put a later snapshot first, which made `take`
-    hardlink against an older one than it should and reported each snapshot's size wrongly.
+    While the VM is up the question is answered inside it. Once it is shut down -- which is when a
+    snapshot is taken -- the final snapshot *is* the machine as it last was, so that is the honest
+    source and the result says so rather than implying a live check.
     """
-    try:
-        return float(json.loads((SNAP_ROOT / f"{label}.meta.json").read_text())["taken"])
-    except (OSError, KeyError, ValueError):
-        try:
-            return (SNAP_ROOT / label).stat().st_mtime
-        except OSError:
-            return 0.0
-
-
-def snapshots() -> List[str]:
-    """Snapshot labels, oldest first."""
-    if not SNAP_ROOT.exists():
-        return []
-    return sorted((d.name for d in SNAP_ROOT.iterdir() if d.is_dir()), key=taken_at)
-
-
-def take(label: str, link_from: Optional[str] = None) -> Dict[str, Any]:
-    """Copy the whole root filesystem into SNAP_ROOT/<label>.
-
-    link_from names an existing snapshot to hardlink unchanged files against; by default the newest
-    one, which is what keeps a second snapshot cheap. rsync is given the trailing-slash form so the
-    root's contents land directly in the snapshot directory.
-    """
-    SNAP_ROOT.mkdir(parents=True, exist_ok=True)
-    dst = SNAP_ROOT / label
-    if dst.exists():
-        raise SystemExit(f"{dst} already exists; pick another label or remove it")
-    if link_from is None:
-        existing = [s for s in snapshots() if s != label]
-        link_from = existing[-1] if existing else None
-    cmd = ["rsync", "-aHAX", "-x", "--numeric-ids", "--delete", "--stats"]
-    if link_from:
-        cmd += ["--link-dest", str(SNAP_ROOT / link_from)]
-    cmd += _excludes() + ["/", str(dst) + "/"]
-    p = _run(cmd, f"take {label}" + (f" (linked to {link_from})" if link_from else " (full)"))
-    # rsync exits 24 when a file vanished mid-copy, which is normal on a live machine.
-    if p.returncode not in (0, 24):
-        raise SystemExit(f"rsync failed: {p.stderr.strip()[:400]}")
-    meta = {"label": label, "taken": time.time(), "link_from": link_from,
-            "rsync_rc": p.returncode, "excludes": list(EXCLUDES)}
-    (dst.parent / f"{label}.meta.json").write_text(json.dumps(meta, indent=1))
-    return meta
+    from ice.exercise import vm
+    for label in vm.overlays():
+        if vm.running(label):
+            p = vm.ssh(["test", "-e", path], check=False, timeout=15)
+            return p.returncode == 0, f"live:{label}"
+    return (root(fallback) / path.lstrip("/")).exists(), f"snapshot:{fallback}"
 
 
 FILE, DIR, LINK = 0, 1, 2
@@ -130,11 +68,11 @@ Entry = Tuple[int, int, int, int, str]   # kind, size, mtime_ns, inode, symlink 
 
 
 def index(label: str) -> Dict[str, Entry]:
-    """{path as it appears on the real machine: entry} for one snapshot."""
-    root = SNAP_ROOT / label
+    """{path as it appears on that machine: entry} for one snapshot."""
+    base_dir = root(label)
     out: Dict[str, Entry] = {}
-    base = len(str(root))
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    cut = len(str(base_dir))
+    for dirpath, dirnames, filenames in os.walk(base_dir, followlinks=False):
         for name in dirnames + filenames:
             fp = os.path.join(dirpath, name)
             try:
@@ -147,7 +85,7 @@ def index(label: str) -> Dict[str, Entry]:
                 kind, target = DIR, ""
             else:
                 kind, target = FILE, ""
-            out[fp[base:] or "/"] = (kind, st.st_size, st.st_mtime_ns, st.st_ino, target)
+            out[fp[cut:] or "/"] = (kind, st.st_size, st.st_mtime_ns, st.st_ino, target)
     return out
 
 
@@ -157,7 +95,7 @@ def _sha256(p: Path) -> Optional[str]:
         with p.open("rb") as fh:
             for chunk in iter(lambda: fh.read(1 << 20), b""):
                 h.update(chunk)
-    except OSError:
+    except (OSError, IsADirectoryError):
         return None
     return h.hexdigest()
 
@@ -167,14 +105,12 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
 
       added / removed   present in only one of the two
       modified          different kind, different size, or a symlink pointing somewhere else
-      mtime_only        same size, different timestamp -- content not compared
+      mtime_only        same size, different timestamp -- contents not compared
       retouched         rewritten with identical bytes (only found with hash_check)
 
-    An unchanged file is a hardlink into the older snapshot, so an equal inode *proves* equal
-    content and no file is read. Directories are deliberately not compared: a directory gets a new
-    inode in every snapshot because it cannot be hardlinked, and treating that as a change reported
-    all 21,054 of this machine's directories as modified. What a directory holds is already reported
-    as the added, removed and modified entries inside it.
+    Directories are deliberately not compared. Two snapshots of the same machine give a directory
+    different inodes, and treating that as a change once reported all 21,054 directories on the box
+    as modified. What a directory holds is already reported as the entries inside it.
 
     hash_check decides mtime_only cases by reading both copies, which is the only way to tell a
     rewrite from a touch; without it they are reported as their own group rather than guessed at.
@@ -196,8 +132,6 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
             if ea[4] != eb[4]:
                 modified.append(p)
             continue
-        if ea[3] == eb[3]:                          # same inode: provably identical
-            continue
         if ea[1] != eb[1]:                          # different size: provably different
             modified.append(p)
             continue
@@ -206,7 +140,7 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
         if not hash_check:
             mtime_only.append(p)
             continue
-        if _sha256(SNAP_ROOT / a / p.lstrip("/")) == _sha256(SNAP_ROOT / b / p.lstrip("/")):
+        if _sha256(root(a) / p.lstrip("/")) == _sha256(root(b) / p.lstrip("/")):
             retouched.append(p)
         else:
             modified.append(p)
@@ -218,14 +152,12 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
             "mtime_only": mtime_only, "retouched": retouched}
 
 
-def changes(a: str, b: str, hash_check: bool = False) -> List[Dict[str, Any]]:
-    """The union of paths from before and after, each annotated with whether it exists right now.
+def changes(a: str, b: str, hash_check: bool = False, live: bool = True) -> List[Dict[str, Any]]:
+    """The union of paths from before and after, each annotated with whether it is there now.
 
-    The union is the point: a file the episode deleted has a diff but no present-day existence, so
-    listing only what is on the machine would hide exactly the changes most worth looking at.
-    `exists_now` is read off the live filesystem rather than off the later snapshot, because the
-    machine is not rolled back for anyone to inspect -- the snapshots are the history, the machine
-    is the present, and a judge should be able to see when those two disagree.
+    The union is the point for deletions: a file the episode removed has a diff but nothing left to
+    look at, so a list built from the machine's present contents would hide exactly the changes most
+    worth seeing.
     """
     d = diff(a, b, hash_check=hash_check)
     ia, ib = index(a), index(b)
@@ -234,14 +166,13 @@ def changes(a: str, b: str, hash_check: bool = False) -> List[Dict[str, Any]]:
     for group in ("removed", "added", "modified", "mtime_only", "retouched"):
         for path in d[group]:
             ea, eb = ia.get(path), ib.get(path)
-            out.append({
-                "path": path,
-                "status": group,
-                "kind": kinds.get((eb or ea)[0], "?"),
-                "size_before": ea[1] if ea else None,
-                "size_after": eb[1] if eb else None,
-                "exists_now": os.path.lexists(path),
-            })
+            row = {"path": path, "status": group,
+                   "kind": kinds.get((eb or ea)[0], "?"),
+                   "size_before": ea[1] if ea else None,
+                   "size_after": eb[1] if eb else None}
+            if live:
+                row["exists_now"], row["exists_now_source"] = exists_now(path, b)
+            out.append(row)
     return out
 
 
@@ -269,18 +200,15 @@ def _read(fp: Path, max_bytes: int) -> Dict[str, Any]:
 
 
 def content(label: str, path: str, max_bytes: int = 100_000) -> Dict[str, Any]:
-    """The bytes of one path, from a snapshot or from the machine as it is now.
+    """The bytes of one path out of one snapshot.
 
-    label is a snapshot name, or "current" to read the live filesystem. Reading a snapshot never
-    touches the machine, so the before-bytes of something the episode deleted are still available
-    without restoring anything.
+    Reading a snapshot never touches the machine, so the before-bytes of something the episode
+    deleted are available without restoring or booting anything.
     """
-    if label == "current":
-        fp = Path(path)
-    else:
-        if not (SNAP_ROOT / label).is_dir():
-            return {"path": path, "error": f"no snapshot named {label!r}"}
-        fp = SNAP_ROOT / label / path.lstrip("/")
+    from ice.exercise import vm
+    if not vm.overlay_path(label).exists():
+        return {"path": path, "error": f"no snapshot named {label!r}"}
+    fp = root(label) / path.lstrip("/")
     if not (fp.exists() or fp.is_symlink()):
         return {"path": path, "label": label, "exists": False}
     return {"path": path, "label": label, "exists": True, **_read(fp, max_bytes)}
@@ -291,16 +219,14 @@ def show(a: str, b: str, path: str, context: int = 3, max_diff_bytes: int = 200_
 
     This is what a judge is handed when it asks about a path -- the change, not the file. A snapshot
     holds the whole machine, including material the episode never touched, so answering with a diff
-    keeps the answer to the question actually asked; the bytes are still available through content()
-    when the diff is not enough.
+    keeps the answer to the question actually asked; the bytes stay reachable through content().
 
-    Binary files are a change like any other, as in git: the entry is reported, both sides' size and
-    sha256 are given, and the diff says it is binary instead of the path being quietly dropped.
+    Binary files are a change like any other, as in git: the entry is reported with both sides' size
+    and sha256 and a diff that says it is binary, rather than the path being dropped as unavailable.
     """
-    fa, fb = SNAP_ROOT / a / path.lstrip("/"), SNAP_ROOT / b / path.lstrip("/")
+    fa, fb = root(a) / path.lstrip("/"), root(b) / path.lstrip("/")
     ea, eb = fa.exists() or fa.is_symlink(), fb.exists() or fb.is_symlink()
-    out: Dict[str, Any] = {"path": path, "exists_now": os.path.lexists(path),
-                           f"in_{a}": ea, f"in_{b}": eb}
+    out: Dict[str, Any] = {"path": path, f"in_{a}": ea, f"in_{b}": eb}
     if not ea and not eb:
         out["status"] = "absent from both"
         return out
@@ -332,107 +258,58 @@ def show(a: str, b: str, path: str, context: int = 3, max_diff_bytes: int = 200_
     return out
 
 
-def restore(label: str, dry_run: bool = False) -> None:
-    """Put the machine back to a snapshot: the whole filesystem, not a list of paths."""
-    src = SNAP_ROOT / label
-    if not src.is_dir():
-        raise SystemExit(f"no snapshot at {src}")
-    cmd = ["rsync", "-aHAX", "-x", "--numeric-ids", "--delete"]
-    if dry_run:
-        cmd += ["--dry-run", "--itemize-changes"]
-    cmd += _excludes() + [str(src) + "/", "/"]
-    p = _run(cmd, f"restore {label}" + (" (dry run)" if dry_run else ""))
-    if dry_run:
-        lines = [l for l in p.stdout.splitlines() if l.strip()]
-        print(f"  would change {len(lines)} paths")
-        for l in lines[:40]:
-            print("   ", l)
-    elif p.returncode not in (0, 24):
-        raise SystemExit(f"rsync failed: {p.stderr.strip()[:400]}")
-
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="whole-filesystem snapshots for episode scoring")
+    ap = argparse.ArgumentParser(description="read and compare two snapshots of an episode's machine")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    t = sub.add_parser("take", help="snapshot the machine")
-    t.add_argument("label")
-    t.add_argument("--link-from", default=None, help="hardlink unchanged files against this snapshot")
-    sub.add_parser("list", help="list snapshots")
     d = sub.add_parser("diff", help="what differs between two snapshots")
     d.add_argument("a")
     d.add_argument("b")
-    d.add_argument("--hash-check", action="store_true", help="hash when inodes differ")
+    d.add_argument("--hash-check", action="store_true", help="hash the same-size, new-mtime cases")
     d.add_argument("--limit", type=int, default=40)
-    s = sub.add_parser("show", help="the change in one path")
-    s.add_argument("a")
-    s.add_argument("b")
-    s.add_argument("path")
     ch = sub.add_parser("changes", help="the union of changed paths, with present-day existence")
     ch.add_argument("a")
     ch.add_argument("b")
     ch.add_argument("--hash-check", action="store_true")
-    ct_ = sub.add_parser("content", help="the bytes of one path, from a snapshot or from 'current'")
-    ct_.add_argument("label")
-    ct_.add_argument("path")
-    ct_.add_argument("--max-bytes", type=int, default=100_000)
-    r = sub.add_parser("restore", help="put the machine back to a snapshot")
-    r.add_argument("label")
-    r.add_argument("--dry-run", action="store_true")
-    rm = sub.add_parser("rm", help="delete a snapshot")
-    rm.add_argument("label")
+    sh_ = sub.add_parser("show", help="the change in one path")
+    sh_.add_argument("a")
+    sh_.add_argument("b")
+    sh_.add_argument("path")
+    ct = sub.add_parser("content", help="the bytes of one path out of one snapshot")
+    ct.add_argument("label")
+    ct.add_argument("path")
+    ct.add_argument("--max-bytes", type=int, default=100_000)
     a = ap.parse_args()
 
-    if a.cmd == "take":
-        print(json.dumps(take(a.label, a.link_from), indent=1))
-    elif a.cmd == "list":
-        labels = snapshots()
-        # One du over every snapshot at once, oldest first: du counts a hardlinked file only on its
-        # first appearance, so the oldest shows the full tree and each later one shows what it alone
-        # added. Measuring them one call at a time reported 16G four times for a 17G store.
-        dirs = [str(SNAP_ROOT / l) for l in labels]
-        sizes = {}
-        if dirs:
-            for line in _run(["du", "-sh"] + dirs).stdout.splitlines():
-                kb, _, path = line.partition("\t")
-                sizes[Path(path.strip()).name] = kb.strip()
-        for label in labels:
-            d_ = SNAP_ROOT / label
-            when = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(taken_at(label)))
-            print(f"  {label:<12} {sizes.get(label, '?'):>7} new   {when}")
-        if dirs:
-            print(f"  {'(store)':<12} {_run(['du', '-sh', str(SNAP_ROOT)]).stdout.split(chr(9))[0]:>7} total")
-    elif a.cmd == "diff":
-        res = diff(a.a, a.b, hash_check=a.hash_check)
-        print(json.dumps(res["counts"], indent=1))
-        for group in ("removed", "modified", "added", "mtime_only"):
-            items = res[group]
-            if items:
-                print(f"\n{group} ({len(items)}):")
-                for p in items[:a.limit]:
-                    print("  ", p)
-                if len(items) > a.limit:
-                    print(f"   ... and {len(items) - a.limit} more")
-    elif a.cmd == "changes":
-        rows = changes(a.a, a.b, hash_check=a.hash_check)
-        print(f"{'status':<12}{'now':<5}{'kind':<8}path")
-        for r in rows:
-            print(f"{r['status']:<12}{'yes' if r['exists_now'] else 'NO':<5}{r['kind']:<8}{r['path']}")
-        print(f"\n{len(rows)} changed paths")
-    elif a.cmd == "content":
-        print(json.dumps(content(a.label, a.path, a.max_bytes), indent=1, ensure_ascii=False)[:8000])
-    elif a.cmd == "show":
-        res = show(a.a, a.b, a.path)
-        d_ = res.pop("diff", None)
-        print(json.dumps(res, indent=1, ensure_ascii=False))
-        if d_:
-            print(d_)
-    elif a.cmd == "restore":
-        restore(a.label, a.dry_run)
-    elif a.cmd == "rm":
-        import shutil
-        shutil.rmtree(SNAP_ROOT / a.label)
-        (SNAP_ROOT / f"{a.label}.meta.json").unlink(missing_ok=True)
-        print(f">>> removed {a.label}")
+    try:
+        if a.cmd == "diff":
+            res = diff(a.a, a.b, hash_check=a.hash_check)
+            print(json.dumps(res["counts"], indent=1))
+            for group in ("removed", "modified", "added", "mtime_only"):
+                items = res[group]
+                if items:
+                    print(f"\n{group} ({len(items)}):")
+                    for p in items[:a.limit]:
+                        print("  ", p)
+                    if len(items) > a.limit:
+                        print(f"   ... and {len(items) - a.limit} more")
+        elif a.cmd == "changes":
+            rows = changes(a.a, a.b, hash_check=a.hash_check)
+            print(f"{'status':<12}{'now':<5}{'kind':<8}path")
+            for r in rows:
+                print(f"{r['status']:<12}{'yes' if r.get('exists_now') else 'NO':<5}"
+                      f"{r['kind']:<8}{r['path']}")
+            print(f"\n{len(rows)} changed paths")
+        elif a.cmd == "show":
+            res = show(a.a, a.b, a.path)
+            body = res.pop("diff", None)
+            print(json.dumps(res, indent=1, ensure_ascii=False))
+            if body:
+                print(body)
+        elif a.cmd == "content":
+            print(json.dumps(content(a.label, a.path, a.max_bytes), indent=1,
+                             ensure_ascii=False)[:8000])
+    finally:
+        release()
 
 
 if __name__ == "__main__":
