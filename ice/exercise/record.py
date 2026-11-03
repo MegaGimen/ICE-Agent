@@ -326,23 +326,24 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _lens_paths(snapshot: Dict[str, Any]) -> List[str]:
-    """Filesystem paths the host snapshot actually watches, so damage can be labelled in- or
-    out-of-lens. critical_files and autostart_files are keyed by path; everything else in the
-    snapshot is keyed by some other identity (username, port, unit) and is not a path."""
+    """What ICE's eyes cover, so damage can be labelled in- or out-of-lens.
+
+    The authoritative part is the collector's own scan roots (`snapshot.lens_globs()`): the declared
+    critical files plus the directory globs its queries read. That is a property of the sensor, not a
+    description of this host, and unlike enumerating a snapshot's rows it still covers a directory
+    the attack was the first to put a file in. The rows of the given snapshot are added on top, since
+    osquery resolves some paths (home directories, extra cron roots) that no pattern spells out.
+    """
+    from ice.daemon.perception.snapshot import lens_globs
+    paths: List[str] = list(lens_globs())
     stable = ((snapshot or {}).get("data") or {}).get("stable") or {}
-    paths: List[str] = []
-    # Keyed by bare path.
-    for table in ("critical_files", "autostart_files"):
-        rows = stable.get(table) or {}
-        if isinstance(rows, dict):
-            paths.extend(k for k in rows if str(k).startswith("/"))
-    # Keyed by "<path>#<content hash>" — one row per entry, several rows per file. The file is
-    # still watched, so treat its path as in-lens; otherwise every /etc/cron.d/* change would be
-    # reported as damage the snapshot could not see, which is the opposite of the truth.
-    for table in ("cron", "sudoers", "autostart"):
-        rows = stable.get(table) or {}
-        if isinstance(rows, dict):
-            paths.extend(str(k).split("#", 1)[0] for k in rows if str(k).startswith("/"))
+    for table, rows in stable.items():
+        if not isinstance(rows, dict):
+            continue
+        for key in rows:
+            p = str(key).split("#", 1)[0]       # cron/sudoers keys are "<path>#<content hash>"
+            if p.startswith("/"):
+                paths.append(p)
     return sorted(set(paths))
 
 
@@ -388,7 +389,8 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     commands, refused = ct.executed_commands(audit), ct.refused_commands(audit)
     lens = _lens_paths(snaps["t0"])
     judgement = evaluate.judge_commands(d, commands, refused, trajectory)
-    checked = ct.verify_paths(judgement.get("paths_to_check") or [], BASELINE_TAR, lens)
+    checked = ct.verify_paths(judgement.get("paths_to_check") or [], BASELINE_TAR, lens,
+                              t0=snaps["t0"], t1=snaps["t1"])
     trace = {"executed": commands, "refused": refused, "judgement": judgement,
              "verified": checked, "snapshot_lens_size": len(lens)}
     (ep_dir / "command-trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1))
@@ -399,6 +401,7 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
     out["provable_damage"] = checked["provable_damage"]
     out["outside_lens_damage"] = checked["outside_lens_damage"]
     out["unverifiable_paths"] = checked["unverifiable"]
+    out["attack_artifacts_removed"] = checked["attack_artifacts_removed"]
     out["unexplained"] = judgement.get("unexplained")
     out["judgement"] = judgement
     print(f"  snapshot diff: {d['counts']}")

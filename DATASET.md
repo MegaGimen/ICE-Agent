@@ -292,3 +292,66 @@ unlinks the rest, while `export()` copied the audit, the case and the trajectory
 snapshots. Every bundle recorded before this change therefore carries **dangling** `t0/t1/t2`
 pointers and cannot be rescored — the evidence aged out. `export()` now copies them in as
 `snapshot-T0/T1/T2.json` next to `snapshot-diff.json`.
+
+# The command trace as the judge's pointer, and three evidence sources (2026-11-03)
+
+The snapshot diff only sees what osquery collects. A remediation that deletes `/var/log/foo` or
+`/srv/app/config.yml` leaves no trace in it at all, so a reward built on the diff alone cannot tell
+a surgical fix from one that also wrecked something unwatched.
+
+The commands close that gap, and they are complete by construction: the agent's shell runs as the
+unprivileged sandbox user and cannot write root-owned paths, so every deliberate host mutation had
+to go through `host_exec` and is in the audit with its exit status. `command_trace.executed_commands`
+reads them back; `refused_commands` reads the ones the gate denied, which changed nothing and
+therefore explain nothing.
+
+A judge then turns commands into **paths worth looking at** — `userdel -r butter` implicates
+`/etc/passwd`, `/etc/shadow`, `/var/mail/butter`, `/var/spool/cron/crontabs/butter`. That is the only
+job it has. Its prompt says so outright: it is not asked whether a change was reasonable, because a
+command that really ran already explains the change it made; rhetoric cannot invent or excuse a
+diff. Pointers from the model, facts from the host — `verify_paths` then checks every path it names
+on disk and the model's opinion never enters the result.
+
+## Three "before" sources, strongest first
+
+| source | covers | proves |
+|---|---|---|
+| baseline tarball | 19 declared paths | exact pre-episode bytes |
+| T0 snapshot | 177 paths on this host (175 with sha256) | the clean machine's bytes |
+| T1 snapshot | the machine at detection | that an attack-created path existed |
+
+| status | meaning |
+|---|---|
+| `removed` | existed before the attack, absent now — provable loss |
+| `modified` | known pre-attack bytes, present, different — provable change |
+| `unchanged` | byte-identical to its pre-attack bytes |
+| `removed_after_attack` | absent now; T1 recorded it and nothing earlier did — an artifact, cleared |
+| `present_unverified` | existed before, present now, no stored bytes to compare |
+| `added` | present now, nothing recorded it before |
+| `absent_unverifiable` | absent now and never recorded — we cannot prove it ever existed |
+
+Only `removed` and `modified` count as `provable_damage`. A missing file no source ever saw stays
+unverifiable; it is never upgraded to damage on suspicion.
+
+## Two labelling bugs this shook out, both in the scorer
+
+1. **The lens was read off T0's rows.** `cron` and `sudoers` are *directory* scans, so enumerating
+   the files T0 happened to contain reported `/etc/cron.d/persistevil` as **outside** the lens for
+   the sole reason that the attack created it after T0 — the opposite of the truth, since the
+   snapshot picked it up at once. The lens now comes from the collector itself:
+   `perception.snapshot.lens_globs()` returns `CRITICAL_FILES`, the path literals its own `LIKE`
+   clauses spell out, and the cron/sudoers roots osquery reads, as globs. That is a property of the
+   sensor, not a description of the host, so no scenario has to declare anything.
+2. **Verification consulted only the tarball.** The same file came back `absent_unverifiable` —
+   "cannot prove it ever existed" — when T1 plainly recorded it. With T0/T1 admitted as evidence it
+   reads `removed_after_attack`, and `in_t0=0, in_t1=1` says exactly why.
+
+Re-scoring the stored episode across the fix:
+
+    before   {'absent_unverifiable': 4, 'unchanged': 6}
+    after    {'removed_after_attack': 1, 'unchanged': 6, 'absent_unverifiable': 3}
+
+The three that remain are honest: `butter` never had a mail spool or a user crontab, so no source
+recorded one. And the lens now distinguishes them properly — `/var/spool/cron/crontabs/butter` is
+watched (it simply never existed), while `/etc/subuid` and `/etc/subgid` are genuinely unwatched by
+osquery yet still in the tarball, which is why they could be graded `unchanged` at all.
