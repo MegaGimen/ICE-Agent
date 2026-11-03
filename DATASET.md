@@ -131,3 +131,67 @@ This Kev build's `/v1/systemone` accepts only `noul` and `choice` questions; a `
 rejected with `422 literal_error ... Input should be 'noul' / 'choice'`. The first episode therefore
 recorded `kev_score: {"error": "HTTPError: HTTP Error 422"}` while its deterministic grade was fine.
 `investigation_quality` is now a `choice` over ordered levels instead.
+
+---
+
+# Recording rig on a privileged VM with hosted models (2026-11-03)
+
+The GPU container was released. Recording now runs on a plain VM with no local models.
+
+## Why this machine instead of the GPU box
+Measured on the VM: systemd is PID 1, `CapEff` has **net_admin, sys_admin, sys_module, sys_boot,
+sys_ptrace, mknod** (nothing missing), docker and iptables are installed, `/dev/kvm` exists and
+`unshare -Ur` works. Every limit that blocked the GPU container is gone, so per-episode disposable
+target containers, iptables containment scenarios and systemd service scenarios are all possible.
+11 cores / 24 GB / 41 GB free is plenty: the only heavy local piece is bge-m3 on CPU.
+
+## Backends
+| role | backend | note |
+|---|---|---|
+| agent (investigation policy) | Alibaba Model Studio **Token Plan**, `qwen3.6-flash`, OpenAI-compatible | per-request billing, so `cost: 0` per call |
+| decision model (detect gate + Jev score) | **TypeSafe Jev**, `https://api.typesafe.ai`, `jev-latest` | `KevClient` talks to it unchanged once `KEV_MODEL` is set |
+| reward judge | `qwen3.6-flash` (same Token Plan) | `ice/exercise/evaluate.py` |
+| embedding + ATT&CK KB (356 techniques) | bge-m3 on this box's CPU | `/root/ice_models`, `ice-data/kb/attack.jsonl` |
+
+Token Plan keys are **plan-scoped** (`sk-sp-…`, 116 chars) and only work against the plan's own base
+URL — a general `sk-` DashScope key on the plan URL, or a plan key on the general URL, is rejected.
+`qwen3.6-35b-a3b` is **not** in the plan (available Qwen: 3.8-max, 3.7-max/plus, 3.8-flash,
+3.6-flash), so trajectories recorded here are teacher traces, not on-policy data for the local model.
+
+## Jev vs the Token Plan's own decision model
+Both speak `POST /v1/systemone`. Running ICE's real detection gate over all 17 labelled fixtures,
+one sample each:
+
+| | TP | FN | FP | TN | verdict channel |
+|---|---|---|---|---|---|
+| **Jev** (`jev-latest`) | 10 | 0 | 4, all `priority=low` | 3 | separates perfectly |
+| `decision-model-preview` | 10 | 0 | 7, **6 at `priority=high`** | 0 | does not separate |
+
+`decision-model-preview` escalated every benign control, six of them at high priority, which the
+orchestrator does **not** fold into one case — six extra full agent runs per cycle. It called
+`pytest_process` suspicious and escalated `hosts_unchanged_mod_time` on verdict alone
+(`max_attr` 0.35), which no `ATTRIBUTE_THRESHOLD` tuning can fix. Jev stays the gate.
+
+## Four bugs this shook out
+1. **`main.py` health gate was hardcoded** to `localhost:8000/8010`. With hosted models the daemon
+   sat in `_wait_for_models` forever and never ran a cycle. Now env-driven; see the commit.
+2. **An unauthenticated health probe cannot check a hosted endpoint.** `_up()` sends a bare GET and
+   `https://api.typesafe.ai/v1/models` answers **403**, so a "Kev" check could only ever fail. The
+   gate exists to wait for local weights to load; a hosted endpoint has no warm-up, so `env.vm.sh`
+   drops both model checks and lets the first judge call be the liveness signal.
+3. **`max_completion_tokens [8192] must be greater than thinking_budget [32768]`.** Declaring the
+   model `"reasoning": true` makes OpenClaw request a 32k thinking budget, which must fit inside
+   `maxTokens`. The two values I had chosen contradicted each other and every agent run failed with
+   an opaque `400: [Malformed diagnostic JSON redacted]`. `maxTokens` is now 40960. The readable
+   error only appears under `openclaw --log-level debug`.
+4. **Port race on daemon restart.** `stop_daemon()` killed and slept 4 s; the next daemon hit
+   `OSError: [Errno 98] Address already in use` and the episode recorded nothing. It now waits for
+   :8083 and :8088 to be released.
+
+## Operational notes
+- `openclaw` ships a `#!/usr/bin/env node` shim, so node must be on PATH. systemd units and cron do
+  not inherit an interactive PATH: node/npm/openclaw are symlinked into `/usr/local/bin`.
+- Never put a `pgrep -f` pattern and the matching launch command in one shell command line. A
+  command line containing the literal `ice.daemon.main` matches `pgrep -f 'ice[.]daemon[.]main'`, so
+  `| xargs kill` kills the session that is about to start the daemon. Daemon restarts go through
+  `/root/ice_daemon_restart.sh` for exactly this reason.
