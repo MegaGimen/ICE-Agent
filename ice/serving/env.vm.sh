@@ -25,10 +25,16 @@ export KEV_MODEL="${KEV_MODEL:-jev-latest}"
 export KEV_TIMEOUT="${KEV_TIMEOUT:-120}"
 if [ -z "${KEV_API_KEY:-}" ]; then KEV_API_KEY="$(_ice_env_value Jev)"; export KEV_API_KEY; fi
 
-# ---- agent model: Token Plan (used by OpenClaw, configured in ~/.openclaw/openclaw.json) ------
-export ICE_AGENT_BASE_URL="${ICE_AGENT_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
-export ICE_AGENT_MODEL="${ICE_AGENT_MODEL:-qwen3.6-flash}"
-if [ -z "${ICE_AGENT_API_KEY:-}" ]; then ICE_AGENT_API_KEY="$(_ice_env_value Bailian)"; export ICE_AGENT_API_KEY; fi
+# ---- agent model: ideastead relay (used by OpenClaw, configured in ~/.openclaw/openclaw.json) --
+# A reseller gateway, not Bailian: 4 models (MiniMax-M2.5, glm-5, qwen3.7-plus, kimi-k2.5), all
+# OpenAI- and Anthropic-compatible, and no /v1/systemone (404), so the decision model stays on Jev.
+# Measured on the relay itself, not taken from the upstream model page: max_tokens must be in
+# [1, 131072]; a ~50k-token prompt is accepted. Our real prompts run ~25k, so a declared window of
+# 131072 never triggers OpenClaw compaction (declaring one too small is what cost the output
+# contract earlier).
+export ICE_AGENT_BASE_URL="${ICE_AGENT_BASE_URL:-https://api.ideastead.com/v1}"
+export ICE_AGENT_MODEL="${ICE_AGENT_MODEL:-qwen3.7-plus}"
+if [ -z "${ICE_AGENT_API_KEY:-}" ]; then ICE_AGENT_API_KEY="$(_ice_env_value idea)"; export ICE_AGENT_API_KEY; fi
 
 # ---- health gating ---------------------------------------------------------------------------
 # This gate exists to wait for local model weights to finish loading (vLLM took minutes). A hosted
