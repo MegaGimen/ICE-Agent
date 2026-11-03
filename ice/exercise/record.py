@@ -26,10 +26,8 @@ is what stops an episode from deleting the recording rig's own SSH key or models
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import time
@@ -41,7 +39,6 @@ from ice.exercise.scenarios import SCENARIOS, Scenario
 
 STATE = Path(os.environ.get("ICE_STATE_DIR", "/root/ice-state"))
 DATASET = Path(os.environ.get("ICE_DATASET_DIR", "/root/ice-dataset"))
-RIG = Path(os.environ.get("ICE_RIG_DIR", "/root/ice-rig"))
 REPO = Path(__file__).resolve().parents[2]
 OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/root/.openclaw"))
 AGENT_DB = OPENCLAW_HOME / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
@@ -54,150 +51,183 @@ KEV_MODEL = os.environ.get("KEV_MODEL", "kev-latest")
 KEV_API_KEY = os.environ.get("KEV_API_KEY", "")
 DAEMON_PY = os.environ.get("ICE_DAEMON_PY", "/root/ice-envs/daemon-env/bin/python")
 
-# Mutable system state an episode (attack or remediation) can change. Restored wholesale per episode.
-BASELINE_PATHS = [
-    "etc/passwd", "etc/shadow", "etc/group", "etc/gshadow", "etc/subuid", "etc/subgid",
-    "etc/sudoers", "etc/sudoers.d", "etc/crontab", "etc/cron.d", "etc/cron.daily",
-    "etc/cron.hourly", "etc/cron.weekly", "etc/cron.monthly", "var/spool/cron",
-    "etc/systemd/system", "etc/ld.so.preload", "etc/hosts.allow", "etc/hosts.deny",
-    "root/.ssh", "home/iceagent/.ssh",
-]
-
-BASELINE_TAR = RIG / "baseline.tar.gz"
-# The healthy machine, as a whole-filesystem snapshot. This is what reset restores and what damage
-# is measured against; the 19-path tarball below survives only because evaluate.post_state still
-# reads it, and is rebuilt from this image so the two cannot drift apart.
-IMAGE_BASELINE = os.environ.get("ICE_IMAGE_BASELINE", "S0")
 INVESTIGATE_TIMEOUT = float(os.environ.get("ICE_RECORD_TIMEOUT", "900"))
 SETTLE_SECONDS = float(os.environ.get("ICE_RECORD_SETTLE", "60"))
 
 
-def sh(cmd: str, label: str = "", check: bool = False) -> subprocess.CompletedProcess:
-    p = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
-    if label:
-        tag = "ok" if p.returncode == 0 else f"rc={p.returncode} {p.stderr.strip()[:90]}"
-        print(f"  [{label}] {cmd[:88]} -> {tag}")
-    if check and p.returncode != 0:
-        raise RuntimeError(f"{label or cmd} failed: {p.stderr.strip()[:200]}")
-    return p
+def vsh(script: str, label: str = "", check: bool = False,
+        timeout: float = 300) -> "subprocess.CompletedProcess":
+    """Run a shell snippet on the target machine, i.e. inside this episode's VM."""
+    from ice.exercise import vm
+    return vm.run_script(script, label=label, check=check, timeout=timeout)
 
 
-# ---------------------------------------------------------------- baseline / reset
+def _mcp_port() -> int:
+    return int(os.environ.get("ICE_MCP_PORT", "8083"))
 
-def snapshot() -> None:
-    """Rebuild the 19-path tarball from the baseline image.
 
-    The image is what reset restores and what damage is measured against. This tarball survives for
-    one reason: evaluate.post_state still reads it. Building it out of the image rather than off the
-    live machine keeps that one consumer from drifting away from the real baseline.
+# Variables that configure the recorder itself and mean nothing to the daemon inside the VM. The
+# judge's credentials are the important ones: they stay on the host, which is the point of running
+# the episode in a VM at all.
+_HOST_ONLY = ("ICE_VM_", "ICE_IMAGE_", "ICE_JUDGE_", "ICE_DATASET_DIR", "ICE_RIG_DIR",
+              "ICE_RECORD_TIMEOUT", "ICE_RECORD_SETTLE", "ICE_RECORD_WARMUP", "ICE_KEEP_LIVE")
+
+
+def push_posture() -> List[str]:
+    """Write the recording posture into the VM as a systemd EnvironmentFile.
+
+    The daemon used to inherit the recorder's own environment, because they were the same process
+    tree on the same machine. Now it is started over ssh, which carries almost nothing, so the
+    posture has to be handed over explicitly or the daemon comes up with no model endpoints, no
+    auto-approval and no force-escalate flag -- and silently records nothing.
     """
-    from ice.exercise import image
-    src = image.SNAP_ROOT / IMAGE_BASELINE
-    if not src.is_dir():
-        raise SystemExit(f"no baseline image at {src}; take it first:\n"
-                         f"    python -m ice.exercise.image take {IMAGE_BASELINE}")
-    RIG.mkdir(parents=True, exist_ok=True)
-    present = [rel for rel in BASELINE_PATHS if (src / rel).exists()]
-    sh(f"tar -czf {BASELINE_TAR} -C {src} " + " ".join(present), "tar-from-image", check=True)
-    print(f">>> {BASELINE_TAR} ({BASELINE_TAR.stat().st_size} bytes) from image "
-          f"{IMAGE_BASELINE}, {len(present)}/{len(BASELINE_PATHS)} paths present")
+    keep = {k: v for k, v in os.environ.items()
+            if (k.startswith("ICE_") or k.startswith("KEV_") or k.startswith("OPENCLAW_"))
+            and not any(k.startswith(h) for h in _HOST_ONLY)}
+    body = "".join(f"{k}={json.dumps(v)}\n" for k, v in sorted(keep.items()))
+    vsh(f"cat > /root/ice-posture.env <<'ICEPOSTURE'\n{body}ICEPOSTURE\n"
+        f"chmod 600 /root/ice-posture.env", label=f"posture ({len(keep)} vars)", check=True)
+    return sorted(keep)
 
 
-def _daemon_ports() -> tuple:
-    """The sockets the daemon binds, read from the same env the daemon reads. Hardcoding 8088 here
-    meant a non-default ICE_DASHBOARD_PORT left stop_daemon() waiting on a port nobody held."""
-    return (int(os.environ.get("ICE_MCP_PORT", "8083")),
-            int(os.environ.get("ICE_DASHBOARD_PORT", "8088")))
+DAEMON_UNIT = """[Unit]
+Description=ICE host daemon (recording)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/ICE
+EnvironmentFile=/root/ice-posture.env
+ExecStart=%s -m ice.daemon.main --no-slack
+Restart=no
+StandardOutput=append:/root/ice-build/daemon.log
+StandardError=append:/root/ice-build/daemon.log
+"""
 
 
-def stop_daemon() -> None:
-    # Never pkill -f on 'ice.daemon.main': this process's own command line contains that string.
-    sh("pgrep -f 'ice[.]daemon[.]main' | xargs -r kill", "stop-daemon")
-    sh("pgrep -f 'openclaw[ ]agent' | xargs -r kill", "stop-agent")
-    # Wait for the sockets to actually be released. A fixed sleep is not enough: the next daemon
-    # then dies with "OSError: [Errno 98] Address already in use" and the episode records nothing.
-    for _ in range(30):
-        busy = [p for p in _daemon_ports()
-                if sh(f"ss -ltn | grep -q ':{p} '").returncode == 0]
-        if not busy:
-            return
-        time.sleep(1)
-    print(f"  [stop-daemon] ports still bound after 30s: {busy}; killing harder")
-    sh("pgrep -f 'ice[.]daemon[.]main' | xargs -r kill -9", "stop-daemon-9")
-    time.sleep(3)
+def install_daemon_unit() -> None:
+    """Hand the daemon to systemd inside the VM.
+
+    Starting it over ssh with setsid and redirection hung the recorder for the full 300s ssh
+    timeout: a backgrounded child keeps the session's file descriptors, and ssh will not close the
+    channel while anything holds them. systemd is what the guest has for running a service, and it
+    gives a clean stop and a log that outlives the process.
+    """
+    vsh(f"mkdir -p /root/ice-build && cat > /etc/systemd/system/ice-daemon.service <<'ICEUNIT'\n"
+        f"{DAEMON_UNIT % DAEMON_PY}ICEUNIT\nsystemctl daemon-reload",
+        label="daemon unit", check=True)
 
 
 def start_daemon() -> None:
-    log = Path(os.environ.get("ICE_RUN_DIR", "/root/ice-build")) / "daemon.log"
-    # Launch with Popen and real file handles, never through sh(): `bash -c "... &"` keeps the
-    # subshell holding capture_output's stdout pipe until the daemon exits, so subprocess.run()
-    # would block here forever.
-    log.parent.mkdir(parents=True, exist_ok=True)
-    fh = log.open("wb")
-    subprocess.Popen([DAEMON_PY, "-m", "ice.daemon.main", "--no-slack"], cwd=str(REPO),
-                     stdout=fh, stderr=fh, stdin=subprocess.DEVNULL, start_new_session=True)
-    print("  [start-daemon] launched")
+    """Start ICE inside the target VM and wait for its MCP socket."""
+    vsh("systemctl restart ice-daemon", label="start-daemon", check=True, timeout=90)
     for _ in range(60):
         time.sleep(2)
-        if sh(f"ss -ltn | grep -q ':{_daemon_ports()[0]} '").returncode == 0:
+        if vsh(f"ss -ltn | grep -q ':{_mcp_port()} '").returncode == 0:
             print("  [start-daemon] MCP up")
             return
-    raise RuntimeError("daemon did not come up")
+    tail = vsh("tail -25 /root/ice-build/daemon.log").stdout
+    raise RuntimeError(f"daemon did not come up inside the VM; log tail:\n{tail}")
 
 
-def reset(episode: str) -> None:
-    """Put the machine, ICE and the agent back to the pristine baseline.
+def stop_daemon() -> None:
+    """Stop ICE inside the VM, so the disk is quiet before it is snapshotted."""
+    vsh("systemctl stop ice-daemon 2>/dev/null; pgrep -f openclaw | xargs -r kill; sleep 2",
+        label="stop-daemon", timeout=120)
 
-    The whole filesystem goes back, not a list of paths. That list was the reason /etc/environment
-    stayed deleted across every episode after one damage test: osquery saw it go, but it was not
-    among the 19 paths the tarball held, so no reset could put it back.
+
+def sync_repo() -> None:
+    """Put the host's current ICE code into the VM, so an episode records the code under test.
+
+    The golden image carries a copy from when it was built; without this, every episode would be
+    recorded against whatever ICE looked like that day.
     """
-    from ice.exercise import image
-    print(f"=== reset for {episode} ===")
-    if not (image.SNAP_ROOT / IMAGE_BASELINE).is_dir():
-        raise RuntimeError(f"no baseline image {IMAGE_BASELINE!r} under {image.SNAP_ROOT}; "
-                           f"run `python -m ice.exercise.image take {IMAGE_BASELINE}` on a clean box")
-    stop_daemon()
-    image.restore(IMAGE_BASELINE)
-    if STATE.exists():
-        shutil.rmtree(STATE)
-    STATE.mkdir(parents=True, exist_ok=True)
-    STATE.chmod(0o700)
-    # Fresh agent memory + transcripts. The previous episode was already exported by then.
-    for p in glob.glob(str(AGENT_DB) + "*"):
-        Path(p).unlink(missing_ok=True)
-    sh(f"{OPENCLAW} sandbox recreate --all >/dev/null 2>&1 || true", "sandbox-recreate")
+    from ice.exercise import vm
+    rsync = ["rsync", "-a", "--delete",
+             "--exclude", "__pycache__", "--exclude", ".git", "--exclude", "*.pyc",
+             "-e", f"ssh -i {vm.KEY} -p {vm.SSH_PORT} " + " ".join(vm._SSH_OPTS),
+             str(REPO) + "/", "root@127.0.0.1:/root/ICE/"]
+    _p = subprocess.run(rsync, capture_output=True, text=True)
+    print(f"  [sync-repo] {'ok' if _p.returncode == 0 else _p.stderr.strip()[:120]}")
+
+
+def boot_target(episode: str) -> Dict[str, str]:
+    """Give this episode a machine of its own and start ICE on it.
+
+    There is nothing to reset. A fresh qcow2 overlay over the golden image *is* a clean machine, so
+    the old sequence -- restore the filesystem, wipe the state directory, delete the agent's
+    database, recreate its sandbox -- collapses into creating a file. The failure that sequence kept
+    producing is gone with it: a path the baseline tarball did not contain, like /etc/environment,
+    stayed deleted across every later episode because no reset could put back what it never held.
+    """
+    from ice.exercise import vm
+    if not vm.BASE.exists():
+        raise RuntimeError(f"no golden image at {vm.BASE}; build it with ice-vm/vm_build.sh")
+    print(f"=== machine for {episode} ===")
+    vm.umount_all()
+    for stale in vm.overlays():
+        if stale != vm.BASE_LABEL and (stale.startswith(episode) or vm.running(stale)):
+            vm.shutdown(stale)
+    live = f"{episode}-live"
+    vm.drop(live)
+    vm.create_overlay(live)
+    vm.boot(live)
+    print(f"  posture pushed: {len(push_posture())} variables")
+    sync_repo()
+    install_daemon_unit()
     start_daemon()
-    # The daemon needs real cycles to lay down T0 for the clean machine before the attack lands.
     warm = float(os.environ.get("ICE_RECORD_WARMUP", "75"))
     print(f"  waiting {warm:.0f}s for the T0 baseline of the clean machine")
     time.sleep(warm)
+    return {"baseline": vm.BASE_LABEL, "live": live}
 
 
 def verify_clean(scenario: Scenario) -> List[str]:
-    """Residue check: the scenario's own markers must be gone before we arm it again."""
+    """Residue check on the target. A fresh overlay cannot carry residue, so this is a tripwire for
+    the golden image itself having been contaminated."""
     dirty = []
     for m in scenario.markers:
-        if sh(f"grep -rl -- {json.dumps(m)} /etc/passwd /etc/cron.d /etc/systemd/system 2>/dev/null"
-              ).stdout.strip():
+        if vsh(f"grep -rl -- {json.dumps(m)} /etc/passwd /etc/cron.d /etc/systemd/system "
+               f"2>/dev/null").stdout.strip():
             dirty.append(m)
     return dirty
+
+
+def pull(remote: str, local: Path) -> bool:
+    """Copy one file out of the VM."""
+    from ice.exercise import vm
+    local.parent.mkdir(parents=True, exist_ok=True)
+    return vm.get(remote, local)
+
+
+def pull_json(remote: str) -> Optional[Dict[str, Any]]:
+    """Read one JSON file out of the VM without keeping a copy."""
+    from ice.exercise import vm
+    p = vm.ssh(["cat", remote], check=False, timeout=60)
+    if p.returncode != 0:
+        return None
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
 
 
 # ---------------------------------------------------------------- observe
 
 def wait_for_case(markers: List[str], since: float) -> Optional[Dict[str, Any]]:
+    """Wait for ICE, inside the VM, to produce a case whose triggers mention the attack."""
+    from ice.exercise import vm
     deadline = time.time() + INVESTIGATE_TIMEOUT
     while time.time() < deadline:
-        for p in sorted(glob.glob(str(STATE / "cases" / "case-*.json")), key=os.path.getmtime, reverse=True):
-            if os.path.getmtime(p) < since - 2:
+        listing = vm.ssh(["bash", "-lc", f"ls -t {STATE}/cases/case-*.json 2>/dev/null | head -20"],
+                         check=False, timeout=60)
+        for path in listing.stdout.split():
+            d = pull_json(path)
+            if not d or "assessment" not in (d.get("_ice") or {}):
                 continue
-            try:
-                d = json.loads(Path(p).read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            trig = " ".join(t.get("value", "") + " " + t.get("field", "") for t in d.get("triggers", []))
-            if any(m in trig for m in markers) and "assessment" in d.get("_ice", {}):
+            trig = " ".join(t.get("value", "") + " " + t.get("field", "")
+                            for t in d.get("triggers", []))
+            if any(m in trig for m in markers):
                 return d
         time.sleep(5)
     return None
@@ -206,22 +236,28 @@ def wait_for_case(markers: List[str], since: float) -> Optional[Dict[str, Any]]:
 # ---------------------------------------------------------------- export
 
 def _session_id_for(case_id: str) -> Optional[str]:
-    p = sh(f"{OPENCLAW} sessions --json --limit all 2>/dev/null")
+    p = vsh(f"PATH=/root/node24/bin:$PATH HOME=/root {OPENCLAW} sessions --json --limit all "
+            f"2>/dev/null")
     try:
         data = json.loads(p.stdout[p.stdout.find("{"):])
     except (ValueError, json.JSONDecodeError):
         return None
-    for s in data.get("sessions", []):
-        if str(s.get("key", "")).endswith(":" + case_id):
-            return s.get("sessionId")
+    for sess in data.get("sessions", []):
+        if str(sess.get("key", "")).endswith(":" + case_id):
+            return sess.get("sessionId")
     return None
 
 
-def _transcript(session_id: str) -> Dict[str, Any]:
-    """Every transcript + trajectory event OpenClaw stored for this session, in order."""
-    if not AGENT_DB.exists():
-        return {"error": "agent db absent"}
-    db = sqlite3.connect(f"file:{AGENT_DB}?mode=ro", uri=True)
+def _transcript(session_id: str, ep_dir: Path) -> Dict[str, Any]:
+    """Every transcript and trajectory event OpenClaw stored, read out of the VM.
+
+    The database is copied to the host first rather than queried over ssh: it is a few megabytes,
+    and sqlite over a pipe is not worth the trouble.
+    """
+    local = ep_dir / "openclaw-agent.sqlite"
+    if not pull(str(AGENT_DB), local):
+        return {"error": f"could not copy {AGENT_DB} out of the VM"}
+    db = sqlite3.connect(f"file:{local}?mode=ro", uri=True)
     try:
         def rows(sql: str) -> List[Dict[str, Any]]:
             out = []
@@ -238,8 +274,11 @@ def _transcript(session_id: str) -> Dict[str, Any]:
             "trajectory_runtime_events": rows(
                 "SELECT seq, event_json FROM trajectory_runtime_events WHERE session_id=? ORDER BY seq"),
         }
+    except sqlite3.DatabaseError as e:
+        return {"error": f"agent db unreadable: {e}"}
     finally:
         db.close()
+        local.unlink(missing_ok=True)
 
 
 def kev_score(scenario: Scenario, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -314,36 +353,30 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def _osquery_snapshots(ep_dir: Path, case: Dict[str, Any]) -> Dict[str, Any]:
-    """Copy the case's T0/T1/T2 osquery snapshots into the bundle and load them.
+    """Load the T0/T1/T2 osquery snapshots collect() pulled out of the VM.
 
-    They must be copied now: the perception store keeps only the last 240 (two hours at a 30s
-    cycle) and prunes the rest, so the case's pointers go dangling long before anyone reads the
-    bundle. Only the runtime tables are scored from these; the file tables duplicate the images.
+    T2 is deliberately not the case's own t2 pointer. Approved actions execute one after another
+    over tens of seconds and ICE records t2 before the last of them has run, which once scored
+    `rm -f /etc/cron.d/persistevil` as not cleared in an episode whose audit shows it ran with rc=0.
+    The newest snapshot taken before the machine was shut down is the honest one.
     """
     from ice.exercise import snapshot_reward as sr
     ice = case.get("_ice") or {}
+    files = sorted(ep_dir.glob("osq-*.json"), key=lambda p: p.stem)
+    if not files:
+        print("  [osquery] no snapshots were pulled out of the VM")
+        return {}
+    by_stamp = {f.stem.replace("osq-", "").split(".")[0]: f for f in files}
     snaps: Dict[str, Any] = {}
     for label in ("t0", "t1"):
         ts = ice.get(label)
-        if ts is None:
-            print(f"  [osquery] {label.upper()} pointer absent in the case")
+        hit = by_stamp.get(str(ts).split(".")[0]) if ts is not None else None
+        if hit is None:
+            print(f"  [osquery] {label.upper()}={ts} not among the pulled snapshots")
             continue
-        hits = sorted(glob.glob(str(STATE / "snapshots" / (str(ts).split(".")[0] + "*.json"))))
-        if not hits:
-            print(f"  [osquery] {label.upper()}={ts} not on disk (pruned by the 240-snapshot window)")
-            continue
-        dst = ep_dir / f"snapshot-{label.upper()}.json"
-        shutil.copy2(hits[0], dst)
-        snaps[label] = sr.load(dst)
-    # T2 is deliberately NOT the case's own t2 pointer. Approved actions execute one after another
-    # over tens of seconds, and ICE records t2 before the last of them has run -- scoring against it
-    # marked `rm -f /etc/cron.d/persistevil` as "not cleared" in an episode where it ran with rc=0.
-    newest = sorted(glob.glob(str(STATE / "snapshots" / "*.json")),
-                    key=lambda p: float(Path(p).stem), reverse=True)
-    if newest:
-        dst = ep_dir / "snapshot-T2.json"
-        shutil.copy2(newest[0], dst)
-        snaps["t2"] = sr.load(dst)
+        snaps[label] = sr.load(hit)
+    newest = max(files, key=lambda p: float(p.stem.replace("osq-", "")))
+    snaps["t2"] = sr.load(newest)
     return snaps
 
 
@@ -419,30 +452,41 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     return out
 
 
+def collect(ep_dir: Path, case: Optional[Dict[str, Any]]) -> None:
+    """Copy what ICE wrote inside the VM into the bundle, while the VM is still up.
+
+    The osquery snapshots in particular cannot wait: the perception store keeps only the last 240,
+    two hours at a 30 second cycle, and prunes the rest.
+    """
+    from ice.exercise import vm
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    pull(f"{STATE}/audit.jsonl", ep_dir / "ice-audit.jsonl")
+    listing = vm.ssh(["bash", "-lc", f"ls {STATE}/cases/case-*.json 2>/dev/null"],
+                     check=False, timeout=60)
+    for path in listing.stdout.split():
+        pull(path, ep_dir / Path(path).name)
+    ice = (case or {}).get("_ice") or {}
+    wanted = [str(ice.get(k)).split(".")[0] for k in ("t0", "t1") if ice.get(k)]
+    snaps = vm.ssh(["bash", "-lc",
+                    f"ls -t {STATE}/snapshots/*.json 2>/dev/null | head -1; "
+                    + "; ".join(f"ls {STATE}/snapshots/{w}*.json 2>/dev/null" for w in wanted)],
+                   check=False, timeout=60)
+    for path in dict.fromkeys(snaps.stdout.split()):
+        pull(path, ep_dir / ("osq-" + Path(path).name))
+    pull("/root/ice-build/daemon.log", ep_dir / "daemon.log")
+
+
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
            images: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+    # collect() has already copied the audit, the cases and the osquery snapshots out of the VM.
     ep_dir.mkdir(parents=True, exist_ok=True)
-    audit = STATE / "audit.jsonl"
-    if audit.exists():
-        shutil.copy2(audit, ep_dir / "ice-audit.jsonl")
-    for p in glob.glob(str(STATE / "cases" / "case-*.json")):
-        shutil.copy2(p, ep_dir / Path(p).name)
     trajectory: Dict[str, Any] = {}
     if case:
         sid = _session_id_for(str(case.get("case_id")))
-        trajectory = _transcript(sid) if sid else {"error": "no openclaw session for case"}
+        trajectory = _transcript(sid, ep_dir) if sid else {"error": "no openclaw session for case"}
         (ep_dir / "agent-trajectory.json").write_text(json.dumps(trajectory, ensure_ascii=False, indent=1))
     det = grade(scenario, case)
     kev = kev_score(scenario, case, trajectory) if case else {"skipped": "no case"}
-    # Environment facts first, then an agent's judgement of them, then the scalar reward. This runs
-    # before the scenario cleanup, so the diff is the machine as the agent actually left it.
-    from ice.exercise import evaluate
-    post = evaluate.post_state(scenario, BASELINE_TAR)
-    judgement = evaluate.judge(scenario, case, trajectory, post)
-    rwd = evaluate.reward(judgement, post)
-    (ep_dir / "post-state.json").write_text(json.dumps(post, ensure_ascii=False, indent=1))
-    print(f"  post-state: {post['counts']} markers_clear={post['markers_clear']}")
-    print(f"  reward(scenario-based): {rwd}")
 
     # Both halves of the score, from the whole filesystem for files and from osquery only for state
     # that has no file behind it.
@@ -452,6 +496,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
     if images:
         score = _score(ep_dir, case, images, ct.executed_commands(audit_path),
                        ct.refused_commands(audit_path))
+
     meta = {
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
@@ -464,11 +509,12 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
                      "ICE_DENY_CRITICAL_ASSETS")},
         "grade": det,
         "kev_score": kev,
-        "post_state_counts": post["counts"],
-        "markers_clear": post["markers_clear"],
-        "agent_judgement": judgement,
-        "reward": rwd,                      # scenario-based (markers + declared artifacts)
-        "reward_scenario_free": score,      # derived, no scenario: the one to train on
+        # One reward, derived from two snapshots of this episode's own machine. The scenario-based
+        # one that used to sit here is gone: it graded against declarations, and its deterministic
+        # backstop grepped file *contents* for markers, so `persistevil` -- a filename -- never
+        # matched and it read clean while the file was on disk. Nothing is lost by its removal;
+        # whatever the scenario declares is still in episode.json under "scenario".
+        "reward": score,
         "counts": {
             "audit_events": sum(1 for _ in (ep_dir / "ice-audit.jsonl").open())
             if (ep_dir / "ice-audit.jsonl").exists() else 0,
@@ -483,66 +529,81 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
 # ---------------------------------------------------------------- episode loop
 
 def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
+    """One episode: a machine of its own, the attack, ICE's response, then two snapshots of it.
+
+    The attack and the response happen inside the VM. The recorder, the judge and the snapshots stay
+    out here, which is why there is no longer a list of files the agent must be stopped from
+    touching: it cannot reach them. An episode that cuts its own model access, as one did by
+    blackholing the relay with iptables, now only cuts its own VM's -- a result to record rather
+    than a rig to repair.
+    """
+    from ice.exercise import image, vm
     ep = f"{scenario.id}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{index:03d}"
-    reset(ep)
-    dirty = verify_clean(scenario)
-    if dirty:
-        print(f"  !! residue after reset: {dirty} — recording anyway, flagged in episode.json")
-    print(f"=== arm {scenario.id} ({'; '.join(scenario.attack)[:100]}) ===")
-    armed = time.time()
-    # Only force escalation from here on: before this point the only changes are reset/warmup noise.
-    flag = os.environ.get("ICE_FORCE_ESCALATE_FLAG")
-    if flag:
-        Path(flag).parent.mkdir(parents=True, exist_ok=True)
-        Path(flag).touch()
-        print(f"  [arm] force-escalate flag on ({flag})")
-    for c in scenario.attack:
-        sh(c, "attack")
-    from ice.exercise import image
-    # Two images bracket the agent: the machine with the attack on it but before the agent has
-    # acted, and the machine it left behind. The first makes the attack's own footprint derivable,
-    # so a change belonging to the attack is never charged to the agent.
-    images = {"baseline": IMAGE_BASELINE, "armed": f"{ep}-armed", "final": f"{ep}-final"}
-    image.take(images["armed"])
-    print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
-    case = wait_for_case(scenario.markers, armed)
-    if flag:
-        Path(flag).unlink(missing_ok=True)   # stop forcing; remediation/backward noise need not escalate
-    if case:
-        print(f"  case {case.get('case_id')} assessment={case.get('_ice', {}).get('assessment')} "
-              f"attck={case.get('attck')}")
-        print(f"  settling {SETTLE_SECONDS:.0f}s for remediation + backward")
-        time.sleep(SETTLE_SECONDS)
-    else:
-        print("  NO case within timeout")
-    image.take(images["final"])
-    # Stop the daemon before scoring. Left running it keeps acting on a machine that is already
-    # measured and about to be reset, and its actions land outside every episode's window -- after
-    # one episode it classified the sustained outbound HTTPS to the model relay as C2 and blackholed
-    # the address that serves both the investigating agent and the judge.
-    stop_daemon()
-    meta = export(DATASET / ep, scenario, case, armed, images)
-    if dirty:
-        meta["reset_residue"] = dirty
-        (DATASET / ep / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
-    print(f">>> {ep}: grade={'MISS' if meta['grade'].get('miss') else 'OK'} "
-          f"counts={meta['counts']}")
-    for c in scenario.cleanup:
-        sh(c, "cleanup")
-    return meta
+    images = boot_target(ep)
+    images.update({"armed": f"{ep}-armed", "final": f"{ep}-final"})
+    live = images["live"]
+    try:
+        dirty = verify_clean(scenario)
+        if dirty:
+            print(f"  !! the golden image carries scenario residue: {dirty} — flagged in the bundle")
+        print(f"=== arm {scenario.id} ({'; '.join(scenario.attack)[:100]}) ===")
+        armed = time.time()
+        # Force escalation only from here on. Before this point the only changes are the warmup's.
+        flag = os.environ.get("ICE_FORCE_ESCALATE_FLAG")
+        if flag:
+            vsh(f"mkdir -p {json.dumps(str(Path(flag).parent))} && touch {json.dumps(flag)}",
+                label="force-escalate on")
+        for c in scenario.attack:
+            vsh(c, "attack")
+
+        # The machine has to be still to be photographed: qcow2 cannot freeze a disk that is being
+        # written. Stopping ICE and shutting down is what makes the armed image a real before-state
+        # rather than a smear, and booting again costs about 17 seconds.
+        print("  snapshotting the armed machine")
+        stop_daemon()
+        vm.shutdown(live)
+        vm.snapshot(images["armed"], of=live)
+        vm.boot(live)
+        start_daemon()
+
+        print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
+        case = wait_for_case(scenario.markers, armed)
+        if flag:
+            vsh(f"rm -f {json.dumps(flag)}")
+        if case:
+            print(f"  case {case.get('case_id')} "
+                  f"assessment={case.get('_ice', {}).get('assessment')} attck={case.get('attck')}")
+            print(f"  settling {SETTLE_SECONDS:.0f}s for remediation + backward")
+            time.sleep(SETTLE_SECONDS)
+        else:
+            print("  NO case within timeout")
+
+        ep_dir = DATASET / ep
+        collect(ep_dir, case)
+        stop_daemon()
+        vm.shutdown(live)
+        vm.snapshot(images["final"], of=live)
+        meta = export(ep_dir, scenario, case, armed, images)
+        if dirty:
+            meta["golden_image_residue"] = dirty
+            (ep_dir / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+        print(f">>> {ep}: grade={'MISS' if meta['grade'].get('miss') else 'OK'} "
+              f"counts={meta['counts']}")
+        return meta
+    finally:
+        image.release()
+        vm.shutdown(live)
+        if os.environ.get("ICE_KEEP_LIVE_OVERLAY") != "1":
+            vm.drop(live)       # the two snapshots are the evidence; the working disk is not
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="ICE trajectory dataset recorder")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("snapshot", help="rebuild the post_state tarball from the baseline image")
     r = sub.add_parser("run", help="record episodes")
     r.add_argument("scenario", choices=sorted(SCENARIOS))
     r.add_argument("--episodes", type=int, default=1)
     a = ap.parse_args()
-    if a.cmd == "snapshot":
-        snapshot()
-        return
     if os.environ.get("ICE_RECORD_MODE") != "1":
         raise SystemExit("set the recording posture first: source ice/serving/record_env.sh")
     DATASET.mkdir(parents=True, exist_ok=True)

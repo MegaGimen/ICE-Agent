@@ -22,30 +22,17 @@ export ICE_FORCE_ESCALATE_FLAG="$ICE_STATE_DIR/FORCE_ESCALATE"
 # Deterministic floor: static policy, not the decision model's judgement and not a human gate.
 # Without it an auto-approved episode can delete this rig's own access or stop its services.
 export ICE_DENY_CRITICAL_ASSETS=1
-# The rig's own files and services, plus the model endpoints it depends on.
+# Critical assets used to be how the rig protected itself: a list of its own paths, services and
+# model endpoints that the safety gate would refuse to let any command name. It was a policy over
+# string matching, and it was needed because the agent ran on the same machine as the recorder --
+# which is also how ICE came to run `iptables -I OUTPUT -d <relay> -j DROP` on the address serving
+# both its own model and the judge, auto-approved, cutting off its own brain.
 #
-# The endpoints are here because ICE blocked one. With the daemon left running after an episode, it
-# saw sustained outbound HTTPS to an unfamiliar address, tied it to the butter account in the same
-# case (blast_radius ['43.161.253.230', 'butter'], T1071.001, confidence 0.78) and ran
-# `iptables -I OUTPUT -d 43.161.253.230 -j DROP`, auto-approved. That address serves both the
-# investigating agent's model and the scoring judge, so it cut off its own brain. The inference was
-# not unreasonable -- an agent's model traffic looks exactly like C2 from the host it is defending.
-# critical_assets is matched against every argument of a command, so naming the address is enough
-# to turn that command into a DENY.
-_ice_endpoint_assets() {
-    local out="" host ip
-    for url in "$ICE_AGENT_BASE_URL" "$ICE_JUDGE_BASE_URL" "$KEV_URL" "$ICE_MAIN_MODEL_BASE_URL"; do
-        [ -n "$url" ] || continue
-        host=$(printf '%s' "$url" | sed -E 's|^[a-z]+://||; s|[:/].*$||')
-        [ -n "$host" ] || continue
-        out="$out,$host"
-        for ip in $(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1}' | sort -u); do
-            out="$out,$ip"
-        done
-    done
-    printf '%s' "$out"
-}
-export ICE_CRITICAL_ASSETS="${ICE_CRITICAL_ASSETS:-/root/ICE,/root/ice-envs,/root/ice-state,/root/ice-build,/root/ice-dataset,/root/ice-images,/root/ice-logs,/root/ice-rig,/root/ice_models,/root/ice-data,/root/.ssh,/root/.ssh/authorized_keys,/root/.openclaw,/root/node24,ice,ice-daemon,osqueryd,sshd,openclaw,8020,8083,8088,127.0.0.1}$(_ice_endpoint_assets)"
+# The episode now runs in a VM of its own and the recorder, the judge and the snapshots are outside
+# it, so the protection is the virtualization boundary rather than a list. What is left here is the
+# product's own idea of what must not be touched on the machine it defends, which is a different
+# question and belongs to ICE rather than to the rig.
+export ICE_CRITICAL_ASSETS="${ICE_CRITICAL_ASSETS:-/etc/shadow,/etc/sudoers,/root/.ssh/authorized_keys,sshd,osqueryd}"
 
 export ICE_RECORD_WARMUP="${ICE_RECORD_WARMUP:-75}"     # seconds for the daemon to take T0 of the clean box
 export ICE_RECORD_TIMEOUT="${ICE_RECORD_TIMEOUT:-900}"  # seconds to wait for an investigated case
