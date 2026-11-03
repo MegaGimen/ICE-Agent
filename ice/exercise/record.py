@@ -151,6 +151,29 @@ def sync_repo() -> None:
     print(f"  [sync-repo] {'ok' if _p.returncode == 0 else _p.stderr.strip()[:120]}")
 
 
+def refuse_host_daemon() -> None:
+    """Refuse to record while an ICE daemon is running on the host.
+
+    The VM boundary covers the rig's files, not its network. qemu's user-mode networking means the
+    guest's packets leave through the *host's* stack, so a daemon on the host sees the VM's model
+    calls as the host contacting an unknown address -- and a leftover one did exactly that twice,
+    running `iptables -I OUTPUT -d <relay> -j DROP` at 21:01 and again at 21:06, which took out the
+    judge on the host and the agent inside the VM at the same time. The agent ran for 200 seconds,
+    used no tools and produced no assessment, because it could not reach its model.
+
+    ICE blocking an address from inside the VM is a result worth recording. ICE blocking one from
+    the host is the recorder being eaten by its own subject.
+    """
+    out = subprocess.run(["pgrep", "-af", "ice[.]daemon[.]main"],
+                         capture_output=True, text=True).stdout.strip()
+    mine = [l for l in out.splitlines() if "ice.exercise" not in l]
+    if mine:
+        raise SystemExit(
+            "an ICE daemon is running on the host:\n  " + "\n  ".join(mine) +
+            "\nIt will act on the recording infrastructure -- the episode's machine is the VM, not "
+            "this box. Stop it first:\n  pkill -f 'ice[.]daemon[.]main'")
+
+
 def boot_target(episode: str) -> Dict[str, str]:
     """Give this episode a machine of its own and start ICE on it.
 
@@ -163,6 +186,7 @@ def boot_target(episode: str) -> Dict[str, str]:
     from ice.exercise import vm
     if not vm.BASE.exists():
         raise RuntimeError(f"no golden image at {vm.BASE}; build it with ice-vm/vm_build.sh")
+    refuse_host_daemon()
     print(f"=== machine for {episode} ===")
     vm.umount_all()
     for stale in vm.overlays():
@@ -174,7 +198,7 @@ def boot_target(episode: str) -> Dict[str, str]:
     vm.boot(live)
     print(f"  posture pushed: {len(push_posture())} variables")
     sync_repo()
-    install_daemon_unit()
+    install_daemon_unit()   # idempotent; the golden image already carries it, so it costs no diff
     start_daemon()
     warm = float(os.environ.get("ICE_RECORD_WARMUP", "75"))
     print(f"  waiting {warm:.0f}s for the T0 baseline of the clean machine")
