@@ -53,6 +53,8 @@ EXCLUDES: Tuple[str, ...] = (
     "/root/.openclaw",           # the agent's own install and state
     "/root/ice-build",           # daemon logs
     "/root/ice-state",           # the daemon's own state dir, rebuilt every episode
+    "/root/.cache/openclaw",     # the agent's sqlite scratch; it churns on every run
+    "/root/ice-logs",            # where episode output goes, since restore would delete it
 )
 
 
