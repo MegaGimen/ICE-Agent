@@ -325,6 +325,27 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "scope_missed": scope_missed, "miss": not verdict_ok, "reasons": reasons}
 
 
+def _lens_paths(snapshot: Dict[str, Any]) -> List[str]:
+    """Filesystem paths the host snapshot actually watches, so damage can be labelled in- or
+    out-of-lens. critical_files and autostart_files are keyed by path; everything else in the
+    snapshot is keyed by some other identity (username, port, unit) and is not a path."""
+    stable = ((snapshot or {}).get("data") or {}).get("stable") or {}
+    paths: List[str] = []
+    # Keyed by bare path.
+    for table in ("critical_files", "autostart_files"):
+        rows = stable.get(table) or {}
+        if isinstance(rows, dict):
+            paths.extend(k for k in rows if str(k).startswith("/"))
+    # Keyed by "<path>#<content hash>" — one row per entry, several rows per file. The file is
+    # still watched, so treat its path as in-lens; otherwise every /etc/cron.d/* change would be
+    # reported as damage the snapshot could not see, which is the opposite of the truth.
+    for table in ("cron", "sudoers", "autostart"):
+        rows = stable.get(table) or {}
+        if isinstance(rows, dict):
+            paths.extend(str(k).split("#", 1)[0] for k in rows if str(k).startswith("/"))
+    return sorted(set(paths))
+
+
 def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
     """Copy the case's T0/T1/T2 snapshots into the bundle and score them without the scenario."""
     from ice.exercise import evaluate, snapshot_reward as sr
@@ -358,10 +379,33 @@ def _snapshot_reward(ep_dir: Path, case: Dict[str, Any], trajectory: Dict[str, A
         return {"error": f"need T0/T1/T2, got {sorted(snaps)}"}
     d = sr.diff(snaps["t0"], snaps["t1"], snaps["t2"])
     (ep_dir / "snapshot-diff.json").write_text(json.dumps(d, ensure_ascii=False, indent=1))
-    judgement = evaluate.judge_diff(d, trajectory)
+
+    # The commands are facts from the audit, and they have no lens limit: `rm -f /var/log/foo` is
+    # recorded even though /var/log is in no snapshot table. A judge turns them into paths to look
+    # at, then every path it names is checked on disk. Pointers from the model, facts from the host.
+    from ice.exercise import command_trace as ct
+    audit = ep_dir / "ice-audit.jsonl"
+    commands, refused = ct.executed_commands(audit), ct.refused_commands(audit)
+    lens = _lens_paths(snaps["t0"])
+    judgement = evaluate.judge_commands(d, commands, refused, trajectory)
+    checked = ct.verify_paths(judgement.get("paths_to_check") or [], BASELINE_TAR, lens)
+    trace = {"executed": commands, "refused": refused, "judgement": judgement,
+             "verified": checked, "snapshot_lens_size": len(lens)}
+    (ep_dir / "command-trace.json").write_text(json.dumps(trace, ensure_ascii=False, indent=1))
+
     out = sr.reward(d, judgement)
+    out["commands_run"] = len(commands)
+    out["paths_checked"] = checked["checked"]
+    out["provable_damage"] = checked["provable_damage"]
+    out["outside_lens_damage"] = checked["outside_lens_damage"]
+    out["unverifiable_paths"] = checked["unverifiable"]
+    out["unexplained"] = judgement.get("unexplained")
     out["judgement"] = judgement
     print(f"  snapshot diff: {d['counts']}")
+    print(f"  commands: {len(commands)} run, {len(refused)} refused | judge named "
+          f"{len(judgement.get('paths_to_check') or [])} paths -> verified {checked['counts']}")
+    if checked["outside_lens_damage"]:
+        print(f"  !! damage outside the snapshot lens: {checked['outside_lens_damage']}")
     print(f"  reward(scenario-free): value={out.get('value')} cleared={out.get('threat_cleared')} "
           f"collateral={out.get('collateral_damage')} ({out.get('collateral_count')} artifacts)")
     return out
