@@ -27,13 +27,18 @@ if [ -z "${KEV_API_KEY:-}" ]; then KEV_API_KEY="$(_ice_env_value Jev)"; export K
 
 # ---- agent model: Token Plan (used by OpenClaw, configured in ~/.openclaw/openclaw.json) ------
 export ICE_AGENT_BASE_URL="${ICE_AGENT_BASE_URL:-https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1}"
-export ICE_AGENT_MODEL="${ICE_AGENT_MODEL:-qwen3.8-max}"
+export ICE_AGENT_MODEL="${ICE_AGENT_MODEL:-qwen3.6-flash}"
 if [ -z "${ICE_AGENT_API_KEY:-}" ]; then ICE_AGENT_API_KEY="$(_ice_env_value Bailian)"; export ICE_AGENT_API_KEY; fi
 
 # ---- health gating ---------------------------------------------------------------------------
-# The agent model is a hosted API with no endpoint for us to poll, so drop that check. Kev's check
-# follows KEV_URL automatically (main.py). The embedding service is local, so it stays.
+# This gate exists to wait for local model weights to finish loading (vLLM took minutes). A hosted
+# endpoint has no warm-up, so there is nothing to wait for -- and ICE's probe is an unauthenticated
+# GET, which TypeSafe answers with 403, so the check could only ever fail and the daemon would sit in
+# _wait_for_models forever. Drop both model checks; the first judge call is the real liveness signal
+# (and gate.py fails open toward investigation if the decision model is unreachable).
 export ICE_MAIN_MODEL_HEALTH=""
+export ICE_KEV_HEALTH=""
+# The embedding service is local and does load weights, so its check stays.
 
 # ---- ICE itself ------------------------------------------------------------------------------
 export ICE_STATE_DIR="${ICE_STATE_DIR:-/root/ice-state}"

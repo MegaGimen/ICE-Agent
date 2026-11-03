@@ -46,7 +46,12 @@ REPO = Path(__file__).resolve().parents[2]
 OPENCLAW_HOME = Path(os.environ.get("OPENCLAW_HOME", "/root/.openclaw"))
 AGENT_DB = OPENCLAW_HOME / "agents" / "main" / "agent" / "openclaw-agent.sqlite"
 OPENCLAW = os.environ.get("ICE_OPENCLAW_BIN", "/root/node24/bin/openclaw")
-KEV_URL = os.environ.get("ICE_KEV_URL", "http://127.0.0.1:8010/v1/systemone")
+# Follow the same KEV_URL/KEV_MODEL/KEV_API_KEY the daemon's judge uses, so a hosted decision model
+# (KEV_URL=https://api.typesafe.ai, KEV_MODEL=jev-latest) is scored through the same endpoint.
+KEV_URL = (os.environ.get("ICE_KEV_URL")
+           or os.environ.get("KEV_URL", "http://127.0.0.1:8010").rstrip("/") + "/v1/systemone")
+KEV_MODEL = os.environ.get("KEV_MODEL", "kev-latest")
+KEV_API_KEY = os.environ.get("KEV_API_KEY", "")
 DAEMON_PY = os.environ.get("ICE_DAEMON_PY", "/root/ice-envs/daemon-env/bin/python")
 
 # Mutable system state an episode (attack or remediation) can change. Restored wholesale per episode.
@@ -273,8 +278,11 @@ def kev_score(scenario: Scenario, case: Dict[str, Any], trajectory: Dict[str, An
                                                "good": "clear evidence and reasoning",
                                                "excellent": "thorough, well-evidenced reasoning"}},
     }
-    body = json.dumps({"state": state, "questions": questions}).encode()
-    req = urllib.request.Request(KEV_URL, data=body, headers={"Content-Type": "application/json"})
+    body = json.dumps({"state": state, "model": KEV_MODEL, "questions": questions}).encode()
+    headers = {"Content-Type": "application/json"}
+    if KEV_API_KEY:
+        headers["Authorization"] = "Bearer " + KEV_API_KEY
+    req = urllib.request.Request(KEV_URL, data=body, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=180) as r:
             return json.loads(r.read())
