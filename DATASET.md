@@ -225,3 +225,70 @@ honours (`json_schema` with `strict` works too — both verified). The orchestra
 when `build_case` found no JSON, so a compliant model costs nothing extra. Flash emits valid JSON
 in that isolated call even unconstrained (fenced, which `extract_json` already parses), so the
 capability was never the issue.
+
+---
+
+# Scenario-free reward (2026-11-03)
+
+The reward no longer needs to know what the attack was. The footprint is **derived**, not declared,
+so it applies to attacks nobody scripted — a red-team run, or a scenario family held out of training.
+
+## How
+ICE already snapshots the host every cycle into `$ICE_STATE_DIR/snapshots/<ts>.json`, and each table
+is keyed by **stable artifact identity**, which is what makes per-artifact attribution possible
+instead of "the cron table changed":
+
+    stable.cron             /etc/cron.d/persistevil#<content hash>
+    stable.accounts         butter
+    stable.ssh_keys         root#<key hash>
+    stable.sudoers          /etc/sudoers#<hash>
+    stable.autostart        <unit>.service
+    stable.listening_ports  tcp/0.0.0.0/4444//tmp/x
+    stable.critical_files   /etc/passwd  (+ sha256)
+
+`ice/exercise/snapshot_reward.py` classifies every artifact across three snapshots:
+
+| group | definition | needs a model? |
+|---|---|---|
+| `footprint` | T0 ≠ T1 — **this is the attack**, observed | no |
+| `cleared` | footprint artifacts back to their exact T0 state at T2 | no |
+| `not_cleared` | footprint artifacts still altered at T2 | no |
+| `collateral` | artifacts the attack never touched that T2 changed or removed | no |
+| `side_effects` | present at T2, in neither T0 nor the footprint | **yes** — quarantine copy or problem? |
+
+    threat_cleared    = |cleared| / |footprint|
+    collateral_damage = |collateral| / |artifacts in T0|
+    value             = threat_cleared - collateral_damage
+
+So wiping the host to "clear" the threat scores no better than doing nothing. The judge is paid only
+for `side_effects` and an advisory quality score, and its prompt is never shown the scenario. Ground
+truth stays in `episode.json` for offline accounting (detection accuracy) — outside the reward loop,
+or you train the policy to guess the label we wrote.
+
+## What the first run proved, and the two faults it exposed
+The derivation works: from T1−T0 it found `stable.ssh_keys::butter#…` **twice** — the attack sets
+`butter`'s home to `/root`, so osquery attributes root's `authorized_keys` entries to `butter` as
+well. That is a real consequence of the attack and the scenario's declared `artifacts` list never
+mentions it.
+
+Both faults were in the scoring, not the agent:
+
+1. **T2 was too early.** It used the case's own `_ice.t2`. Approved actions execute one after
+   another over tens of seconds and ICE records `t2` before the last of them runs, so
+   `rm -f /etc/cron.d/persistevil` scored as `not_cleared` in an episode whose audit shows it ran
+   with `rc=0`. T2 is now the newest snapshot at export time, i.e. after the settle window.
+2. **`flow` is not evidence.** A single sample of the process table is momentary: `kworker/u27`
+   turned up as attack footprint, `kworker/u30`/`u32` as collateral damage, and the rig's own
+   `node` processes as remediation side-effects. Scoring is restricted to `stable`; a listening
+   backdoor is still caught because `listening_ports` lives there.
+
+And a third, in the older scenario-based reward it replaces: `post_state` greps file **contents**
+for the scenario markers, so a filename-only marker like `persistevil` never matches and
+`markers_clear` always read true. Its `threat_cleared=1.0` was not earned.
+
+## The gap that had to be closed first
+`perception/store.py` keeps the last **240** snapshots (`keep=240`, two hours at a 30 s cycle) and
+unlinks the rest, while `export()` copied the audit, the case and the trajectory but never the
+snapshots. Every bundle recorded before this change therefore carries **dangling** `t0/t1/t2`
+pointers and cannot be rescored — the evidence aged out. `export()` now copies them in as
+`snapshot-T0/T1/T2.json` next to `snapshot-diff.json`.
