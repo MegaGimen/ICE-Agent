@@ -36,6 +36,35 @@ OVERLAYS = VM_DIR / "overlays"
 MOUNTS = VM_DIR / "mnt"
 
 SSH_PORT = int(os.environ.get("ICE_VM_SSH_PORT", "2222"))
+_PORT: Dict[str, int] = {}
+
+
+def _free_port(start: int = SSH_PORT) -> int:
+    """A loopback port nothing is listening on.
+
+    qemu does not fail when `hostfwd` cannot bind -- it prints a warning and runs on without the
+    forward. With a fixed port that turns a second VM into a silent impostor: ssh on 2222 reaches
+    whichever machine got there first, so the posture, the repo sync and the daemon all land on the
+    wrong one and the episode looks like it worked.
+    """
+    import socket as _s
+    for port in range(start, start + 64):
+        with _s.socket(_s.AF_INET, _s.SOCK_STREAM) as sock:
+            sock.setsockopt(_s.SOL_SOCKET, _s.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+        if port not in _PORT.values():
+            return port
+    raise RuntimeError(f"no free loopback port in {start}..{start + 64}")
+
+
+def ssh_port(label: str = "") -> int:
+    """The port this VM's ssh is forwarded to. Set when it boots."""
+    if label and label in _PORT:
+        return _PORT[label]
+    return next(iter(_PORT.values())) if _PORT else SSH_PORT
 MEM_MB = int(os.environ.get("ICE_VM_MEM", "4096"))
 CPUS = int(os.environ.get("ICE_VM_CPUS", "4"))
 BOOT_TIMEOUT = float(os.environ.get("ICE_VM_BOOT_TIMEOUT", "240"))
@@ -208,17 +237,24 @@ def boot(label: str, wait: bool = True) -> None:
     if running(label):
         raise RuntimeError(f"{label} is already running")
     console = VM_DIR / f"{label}.console.log"
+    port = _PORT.get(label) or _free_port()
+    _PORT[label] = port
     cmd = ["qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
            "-m", str(MEM_MB), "-smp", str(CPUS),
            "-drive", f"file={img},if=virtio,cache=writeback",
            "-drive", f"file={SEED},media=cdrom",
-           "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{SSH_PORT}-:22",
+           "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:22",
            "-device", "virtio-net-pci,netdev=n0",
            "-display", "none", "-serial", f"file:{console}",
            "-daemonize", "-pidfile", str(pid_file(label))]
-    _run(cmd, f"boot {label}")
+    _run(cmd, f"boot {label} (ssh :{port})")
     if wait:
         wait_for_ssh(label)
+
+
+def alive(label: str) -> bool:
+    """Is this VM both running and answering ssh?"""
+    return running(label) and ssh(["true"], check=False, timeout=10).returncode == 0
 
 
 def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
@@ -236,7 +272,7 @@ def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
 def ssh(argv: List[str], check: bool = True, timeout: Optional[float] = 300,
         capture: bool = True) -> subprocess.CompletedProcess:
     """Run a command inside the VM. argv is passed through, not shell-joined by us."""
-    cmd = ["ssh", "-i", str(KEY), "-p", str(SSH_PORT), *_SSH_OPTS, "root@127.0.0.1", *argv]
+    cmd = ["ssh", "-i", str(KEY), "-p", str(ssh_port()), *_SSH_OPTS, "root@127.0.0.1", *argv]
     p = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(f"ssh {argv[:2]} failed rc={p.returncode}: {p.stderr.strip()[:300]}")
@@ -262,7 +298,7 @@ def run_script(body: str, label: str = "", check: bool = True,
     Quoting a snippet through ssh, python's argv and the guest's bash in turn is how a useradd call
     arrived with its arguments mangled; stdin has no quoting layer to get wrong.
     """
-    cmd = ["ssh", "-i", str(KEY), "-p", str(SSH_PORT), *_SSH_OPTS, "root@127.0.0.1",
+    cmd = ["ssh", "-i", str(KEY), "-p", str(ssh_port()), *_SSH_OPTS, "root@127.0.0.1",
            "bash", "-s"]
     p = subprocess.run(cmd, input=body, capture_output=True, text=True, timeout=timeout)
     if label:
@@ -274,17 +310,17 @@ def run_script(body: str, label: str = "", check: bool = True,
 
 
 def put(local: Path, remote: str) -> None:
-    _run(["scp", "-q", "-i", str(KEY), "-P", str(SSH_PORT), *_SSH_OPTS,
+    _run(["scp", "-q", "-i", str(KEY), "-P", str(ssh_port()), *_SSH_OPTS,
           str(local), f"root@127.0.0.1:{remote}"])
 
 
 def get(remote: str, local: Path) -> bool:
-    p = _run(["scp", "-q", "-i", str(KEY), "-P", str(SSH_PORT), *_SSH_OPTS,
+    p = _run(["scp", "-q", "-i", str(KEY), "-P", str(ssh_port()), *_SSH_OPTS,
               f"root@127.0.0.1:{remote}", str(local)], check=False)
     return p.returncode == 0
 
 
-def shutdown(label: str, timeout: float = 90) -> None:
+def shutdown(label: str, timeout: float = 120) -> None:
     """Shut the VM down cleanly, so the disk is consistent before it is snapshotted."""
     if not running(label):
         return

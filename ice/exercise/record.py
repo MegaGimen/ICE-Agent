@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import sqlite3
+import shutil
 import subprocess
 import time
 import urllib.request
@@ -238,13 +239,39 @@ def pull_json(remote: str) -> Optional[Dict[str, Any]]:
 
 # ---------------------------------------------------------------- observe
 
-def wait_for_case(markers: List[str], since: float) -> Optional[Dict[str, Any]]:
-    """Wait for ICE, inside the VM, to produce a case whose triggers mention the attack."""
+class TargetLost(RuntimeError):
+    """The episode's machine stopped answering. Not a detection failure -- an infrastructure one."""
+
+
+def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[str, Any]]:
+    """Wait for ICE, inside the VM, to produce a case whose triggers mention the attack.
+
+    Every ssh call here used to be best-effort, so when the VM stopped answering mid-investigation
+    the loop polled a dead machine for the full 900 seconds and reported "NO case" -- which reads as
+    ICE having failed to detect the attack, when nothing had been running to detect it. That is the
+    worst kind of failure in a recorder: it looks like a result.
+    """
     from ice.exercise import vm
     deadline = time.time() + INVESTIGATE_TIMEOUT
+    misses = 0
     while time.time() < deadline:
         listing = vm.ssh(["bash", "-lc", f"ls -t {STATE}/cases/case-*.json 2>/dev/null | head -20"],
                          check=False, timeout=60)
+        if listing.returncode != 0:
+            misses += 1
+            if not vm.running(live):
+                raise TargetLost(f"{live} is no longer running "
+                                 f"(console: {vm.VM_DIR}/{live}.console.log)")
+            if misses >= 5:
+                raise TargetLost(
+                    f"{live} stopped answering ssh after {misses} tries: "
+                    f"{(listing.stderr or '').strip()[:160]} "
+                    f"(console: {vm.VM_DIR}/{live}.console.log)")
+            print(f"  [wait] no answer from the target ({misses}/5): "
+                  f"{(listing.stderr or '').strip()[:90]}")
+            time.sleep(10)
+            continue
+        misses = 0
         for path in listing.stdout.split():
             d = pull_json(path)
             if not d or "assessment" not in (d.get("_ice") or {}):
@@ -500,6 +527,17 @@ def collect(ep_dir: Path, case: Optional[Dict[str, Any]]) -> None:
     pull("/root/ice-build/daemon.log", ep_dir / "daemon.log")
 
 
+def collect_host_side(ep_dir: Path, live: str) -> None:
+    """Copy what the host holds about the VM. This works even when the VM has stopped answering,
+    which is exactly when it matters: the bundle for the episode that lost its target held nothing
+    but the diff, because every ssh in collect() failed silently."""
+    from ice.exercise import vm
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    console = vm.VM_DIR / f"{live}.console.log"
+    if console.exists():
+        shutil.copy2(console, ep_dir / "vm-console.log")
+
+
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
            images: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     # collect() has already copied the audit, the cases and the osquery snapshots out of the VM.
@@ -564,12 +602,25 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
     from ice.exercise import image, vm
     ep = f"{scenario.id}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{index:03d}"
     images = boot_target(ep)
-    images.update({"armed": f"{ep}-armed", "final": f"{ep}-final"})
+    images.update({"baseline": f"{ep}-clean", "armed": f"{ep}-armed",
+                   "final": f"{ep}-final"})
     live = images["live"]
     try:
         dirty = verify_clean(scenario)
         if dirty:
             print(f"  !! the golden image carries scenario residue: {dirty} — flagged in the bundle")
+        # The baseline has to be the machine as the attack found it, which means after the recorder
+        # has finished preparing it. Scoring against the golden image instead charged the attack
+        # with the recorder's own setup: the systemd unit, and every file sync_repo() had just
+        # updated, showed up as attack footprint and then as "not cleared".
+        print("  snapshotting the prepared machine as the baseline")
+        stop_daemon()
+        vm.shutdown(live)
+        vm.snapshot(images["baseline"], of=live)
+        vm.boot(live)
+        start_daemon()
+        time.sleep(float(os.environ.get("ICE_RECORD_WARMUP", "75")))
+
         print(f"=== arm {scenario.id} ({'; '.join(scenario.attack)[:100]}) ===")
         armed = time.time()
         # Force escalation only from here on. Before this point the only changes are the warmup's.
@@ -591,7 +642,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         start_daemon()
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
-        case = wait_for_case(scenario.markers, armed)
+        case = wait_for_case(scenario.markers, armed, live)
         if flag:
             vsh(f"rm -f {json.dumps(flag)}")
         if case:
@@ -604,6 +655,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
 
         ep_dir = DATASET / ep
         collect(ep_dir, case)
+        collect_host_side(ep_dir, live)
         stop_daemon()
         vm.shutdown(live)
         vm.snapshot(images["final"], of=live)
@@ -614,6 +666,20 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         print(f">>> {ep}: grade={'MISS' if meta['grade'].get('miss') else 'OK'} "
               f"counts={meta['counts']}")
         return meta
+    except TargetLost as e:
+        ep_dir = DATASET / ep
+        collect_host_side(ep_dir, live)
+        print(f"!! target lost: {e}")
+        (ep_dir / "episode.json").write_text(json.dumps(
+            {"episode_dir": ep, "scenario": scenario.id, "images": images,
+             "aborted": "target lost", "detail": str(e),
+             "grade": {"detected": False, "miss": None,
+                       "reasons": ["the episode's machine stopped answering; nothing was running "
+                                   "to detect the attack, so this is not a detection result"]},
+             "reward": {"scored": False, "value": None, "unscored_reason": f"target lost: {e}"}},
+            ensure_ascii=False, indent=1))
+        return {"episode_dir": ep, "aborted": "target lost",
+                "grade": {"miss": None}, "counts": {}}
     finally:
         image.release()
         vm.shutdown(live)
@@ -636,8 +702,12 @@ def main() -> None:
     for i in range(1, a.episodes + 1):
         print(f"\n########## episode {i}/{a.episodes} ##########")
         results.append(run_episode(scenario, i))
-    ok = sum(1 for m in results if not m["grade"].get("miss"))
-    print(f"\n>>> {len(results)} episodes recorded into {DATASET} — {ok} detected, {len(results) - ok} missed")
+    lost = [m for m in results if m.get("aborted")]
+    graded = [m for m in results if not m.get("aborted")]
+    ok = sum(1 for m in graded if not m["grade"].get("miss"))
+    print(f"\n>>> {len(graded)} episodes recorded into {DATASET} — {ok} detected, "
+          f"{len(graded) - ok} missed"
+          + (f"; {len(lost)} aborted (target lost, not a detection result)" if lost else ""))
 
 
 if __name__ == "__main__":
