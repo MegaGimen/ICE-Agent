@@ -266,6 +266,17 @@ def cross_check(ep_dir: Path, case: Optional[Dict[str, Any]],
     if executed and score.get("changed_paths_total") == 0:
         problems.append(f"the audit records {executed} executed command(s) and the snapshots show "
                         f"no change at all: the images may not be this episode's")
+    tools = counts.get("tool", 0)
+    traj = ep_dir / "agent-trajectory.json"
+    events = 0
+    if traj.exists():
+        try:
+            events = len(json.loads(traj.read_text()).get("transcript_events") or [])
+        except (OSError, json.JSONDecodeError):
+            events = 0
+    if tools and not events:
+        problems.append(f"the audit records {tools} agent tool call(s) and no trajectory was "
+                        f"collected: the investigation happened and was not saved")
     if not counts:
         problems.append("no audit was collected at all; nothing about this episode is verifiable")
     if problems:
@@ -638,6 +649,19 @@ def collect(ep_dir: Path, case: Optional[Dict[str, Any]]) -> None:
         pull(path, ep_dir / ("osq-" + Path(path).name))
     pull("/root/ice-build/daemon.log", ep_dir / "daemon.log")
 
+    # The trajectory has to be fetched here, not in export(). export() runs after the machine has
+    # been shut down to be snapshotted, so every ssh it made failed and every episode so far
+    # recorded transcript_events: 0 -- the agent's investigation, which is the point of the
+    # dataset, was the one thing not being saved.
+    if case:
+        sid = _session_id_for(str(case.get("case_id")))
+        traj = _transcript(sid, ep_dir) if sid else {"error": "no openclaw session for case"}
+        (ep_dir / "agent-trajectory.json").write_text(json.dumps(traj, ensure_ascii=False, indent=1))
+        n = len(traj.get("transcript_events") or [])
+        print(f"  trajectory: {n} transcript events"
+              + (f", {len(traj.get('trajectory_runtime_events') or [])} runtime events"
+                 if n else f" ({traj.get('error', 'empty')})"))
+
 
 def collect_host_side(ep_dir: Path, live: str) -> None:
     """Copy what the host holds about the VM. This works even when the VM has stopped answering,
@@ -654,11 +678,14 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
            images: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     # collect() has already copied the audit, the cases and the osquery snapshots out of the VM.
     ep_dir.mkdir(parents=True, exist_ok=True)
+    # Already fetched by collect(), while the machine was still up.
     trajectory: Dict[str, Any] = {}
-    if case:
-        sid = _session_id_for(str(case.get("case_id")))
-        trajectory = _transcript(sid, ep_dir) if sid else {"error": "no openclaw session for case"}
-        (ep_dir / "agent-trajectory.json").write_text(json.dumps(trajectory, ensure_ascii=False, indent=1))
+    traj_file = ep_dir / "agent-trajectory.json"
+    if traj_file.exists():
+        try:
+            trajectory = json.loads(traj_file.read_text())
+        except json.JSONDecodeError as e:
+            trajectory = {"error": f"unreadable trajectory: {e}"}
     det = grade(scenario, case)
     kev = kev_score(scenario, case, trajectory) if case else {"skipped": "no case"}
 
