@@ -125,11 +125,24 @@ def _restore_scratch() -> None:
                 sh(f"rm -rf -- {json.dumps(line.strip())}")
 
 
+DAEMON_PORTS = (8083, 8088)   # MCP server, dashboard
+
+
 def stop_daemon() -> None:
     # Never pkill -f on 'ice.daemon.main': this process's own command line contains that string.
     sh("pgrep -f 'ice[.]daemon[.]main' | xargs -r kill", "stop-daemon")
     sh("pgrep -f 'openclaw[ ]agent' | xargs -r kill", "stop-agent")
-    time.sleep(4)
+    # Wait for the sockets to actually be released. A fixed sleep is not enough: the next daemon
+    # then dies with "OSError: [Errno 98] Address already in use" and the episode records nothing.
+    for _ in range(30):
+        busy = [p for p in DAEMON_PORTS
+                if sh(f"ss -ltn | grep -q ':{p} '").returncode == 0]
+        if not busy:
+            return
+        time.sleep(1)
+    print(f"  [stop-daemon] ports still bound after 30s: {busy}; killing harder")
+    sh("pgrep -f 'ice[.]daemon[.]main' | xargs -r kill -9", "stop-daemon-9")
+    time.sleep(3)
 
 
 def start_daemon() -> None:
