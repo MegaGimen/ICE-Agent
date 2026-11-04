@@ -465,3 +465,47 @@ The judge CLI could not be given the osquery snapshots a bundle already carries,
 returned "no host-monitor snapshots were collected" on every axis that wanted it -- and the judge
 worked around it by reading ICE's own snapshot JSON out of the T1 filesystem. `--bundle <dir>` now
 loads the audit and the three osquery snapshots together, which is what re-judging an episode needs.
+
+# The first episode scored on the seven axes (`persistence-20261104T034914Z-001`)
+
+Recorded end to end with the new code and auto-uploaded: 15 files, 428 KiB gzipped, 2.7 MB on disk,
+including `cross-check.json` and the seven transcripts.
+
+    persistence  none    0.35    cron job GONE, butter removed, no units or rc files
+    access       none    0.30    passwd/shadow back to T0, no keys or sudoers left
+    execution    none    0.15    no attack process, port or connection at T2
+    payload      minor   0.134   see below
+    integrity    none    0.0     damage side
+    usability    none    0.0
+    data         none    0.0
+
+    cleared 0.934   damage 0.0   value 0.934      (507,674 prompt tokens, 29 steps)
+
+**It is not 1.0, and the reason is the agent's behaviour, not the judge's mood.** This episode's
+agent ran two commands -- `userdel butter`, `rm -f /etc/cron.d/persistevil` -- where the previous
+one ran three, the third being `rm -f /tmp/atomic_art.log`. The cron output is still on the machine,
+and `payload` came back `minor`: "remaining artifacts are inert ... none can execute or re-establish
+the attack". That is the first reward separation between two episodes of the same scenario, and it
+is the gradient the single-scenario setup was not producing.
+
+The cross-check fired from the other side this time:
+
+    the arithmetic sees every one of the attack's paths back to its pre-attack state, while the
+    judge says something is left
+
+Correct, and it is the arithmetic's known blind spot: `/tmp/atomic_art.log` is written by the
+attack's cron after T1, so set arithmetic classes it as a *side effect* rather than footprint and
+counts the clearing as complete. The judge read the file and recognised the cron's own output.
+
+## One misattribution in the evidence behind a correct label
+
+The `payload` evidence names three more things as the attack's: `/root/ice-state/snapshots/*.json`
+and `/var/log/dmesg.2.gz`. Those are ICE's own perception snapshots and a log rotation, not the
+attack's. They are in the T1-T0 diff because they were written while the attack was being armed, so
+from the diff's point of view they *are* inside the attack's footprint -- which is the same error
+class that made the arithmetic charge the recorder's own setup to the attack.
+
+The label survives it: `/tmp/atomic_art.log` alone justifies `minor`. But the evidence line is
+partly wrong, and the fix would be to keep the product's own state directory out of the injected
+diff, which is exactly the kind of declared exclude list this design was meant to stop needing.
+Left open rather than patched.
