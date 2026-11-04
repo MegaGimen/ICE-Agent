@@ -11,3 +11,6 @@ __pycache__/
 deploy/local-secrets/
 plan.md
 colab.md
+# Recorded episode bundles: data, not code. Synced from the recording box with
+# ice/exercise/sync_bundles.sh; 1.7 MB each and they would swamp the history.
+/dataset/
