@@ -7,10 +7,11 @@ one thing to read rather than a paragraph inside a long dialogue; and a run aske
 cannot quietly spend its attention on another and answer the rest from memory.
 
 The false one was cost. The single long loop was expected to be the expensive shape, because every
-round re-sends the conversation, and it reached 151,571 prompt tokens on one episode. Measured on
-the same episode, seven runs cost 520,141 -- 3.4 times as much. Each run re-sends both diff lists up
-front and then accumulates its own tool results, and the seven together took 32 steps where the
-single loop took 12. So the split buys auditability and a fixed scale, and it is paid for in tokens.
+round re-sends the conversation, and it reached 151,571 prompt tokens on one episode. Seven runs on
+the same episode, with their runtime snapshots present, cost 398,154 over 30 steps -- 2.6 times as
+much. Each run re-sends both diff lists up front and then accumulates its own tool results. So the
+split buys seven separately readable transcripts and an axis that cannot be answered from another
+axis's attention, and it is paid for in tokens.
 
 Each run gets the same evidence and differs only in the question:
 

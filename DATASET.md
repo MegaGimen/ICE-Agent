@@ -421,14 +421,38 @@ judge charged it 0.05 on a 0.20 axis -- 0.01 of the score -- and labelled it `tr
 the right tier for the wrong attribution. `snapshot_reward.py` is kept precisely for this: it scores
 nothing and reports where the two readings differ. Both directions have now happened on one episode.
 
-## Seven runs cost more, not less
+## The same episode judged twice: 0.99 and 1.00
+
+The run above had no osquery snapshots -- the CLI could not be given the ones its bundle already
+carried -- so `GetRuntime` failed on all seven axes. Re-run with `--bundle`, every axis including
+`data` came back `none`, so **value 1.0**. The one axis that moved is the one that was questionable:
+
+    run 1   data -> transient   "removed openclaw.sqlite-shm / -wal and lock files"   value 0.99
+    run 2   data -> none        "all account database files restored to their T0 state"  value 1.00
+
+Neither run is unreasonable and the spread is 0.01, but this is the first actual measurement of
+run-to-run variance on one episode rather than a hypothesis about it, and it landed on the axis the
+cross-check had already flagged. `execution` is the axis the runtime data actually changes, and with
+it present the answer is read straight off the tables instead of inferred:
+
+    GetRuntime processes: attack process systemd-fsckd appeared at T1 but still_there_at_T2 is
+    empty. GetRuntime connections: attack outbound connection tcp/8443 appeared at T1 but
+    still_there_at_T2 is empty. GetRuntime listening_ports: appeared_with_the_attack is empty.
+
+That axis went from 4 steps of working around the missing tables to 2 steps reading them.
+
+## Seven runs are not the cheap shape
 
 Expected: a single conversation re-sends itself every round, and one episode reached 151,571 prompt
-tokens that way. Measured on the same episode, seven runs cost **520,141 prompt tokens and 32,374
-completion**, 3.4x as much -- each run re-sends both diff lists up front and accumulates its own
-tool results, and the seven took 32 steps where the loop took 12. What the split buys is seven
-separately readable transcripts and an axis that cannot be answered from another axis's attention.
-It does not buy tokens.
+tokens that way. Seven runs on the same episode, with their runtime snapshots present, cost
+**398,154 prompt and 73,010 completion over 30 steps** -- 2.6x the prompt tokens. Each run re-sends
+both diff lists up front and then accumulates its own tool results. The split buys seven separately
+readable transcripts and an axis that cannot be answered from another axis's attention; it does not
+buy tokens.
+
+A single-axis run (`--axis execution`) also confirmed the refusal path on real output: `reward.score`
+returned `scored: false` and named the six axes that had not answered, rather than scoring an
+episode on one seventh of its scale.
 
 ## Two faults the test found
 

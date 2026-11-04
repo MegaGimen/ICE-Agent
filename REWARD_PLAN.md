@@ -76,10 +76,10 @@ The judge is invoked once per axis, which leaves seven separate transcripts: a `
 `integrity` is one thing to read rather than a paragraph inside a long dialogue, and a run asked
 about one axis cannot answer the other six from memory.
 
-It is not cheaper. That was the expectation -- a single loop re-sends the whole conversation every
-round, and one episode reached 151,571 prompt tokens that way -- but measured on the same episode
-the seven runs cost **520,141 prompt tokens**, 3.4 times as much: each run re-sends both diff lists
-up front and accumulates its own tool results, and the seven took 32 steps where the loop took 12.
+It is not cheaper, which was the other reason given for it and should not be relied on. A single
+loop re-sends the whole conversation every round and one episode reached 151,571 prompt tokens that
+way; seven runs on the same episode, with their runtime snapshots present, cost **398,154 over 30
+steps** -- 2.6 times as much.
 
 Each run gets the same evidence and differs only in the question:
 
