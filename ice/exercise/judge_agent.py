@@ -588,6 +588,42 @@ def judge(t0: str, t1: str, t2: str, commands: List[Dict[str, Any]],
     return out
 
 
+def _write_back(bundle: "Path", verdict: Dict[str, Any], scored: Dict[str, Any],
+                axes: Tuple[str, ...]) -> None:
+    """Put a re-judged verdict into the bundle, keeping what it replaces.
+
+    A bundle is the data point, and three of twelve were carrying a score that had been re-judged
+    on the same evidence and found wrong -- the correction lived only in a log on a rented box. The
+    old score is kept rather than overwritten, because the pair is the evidence that a rule change
+    moved the number and the evidence did not.
+    """
+    ep = bundle / "episode.json"
+    try:
+        meta = json.loads(ep.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"!! cannot write back: {e}")
+        return
+    old = meta.get("reward") or {}
+    history = meta.setdefault("reward_history", [])
+    history.append({"replaced_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "value": old.get("value"), "scored": old.get("scored"),
+                    "unscored_reason": old.get("unscored_reason"),
+                    "axes": [{"axis": r.get("axis"), "severity": r.get("severity")}
+                             for r in (old.get("axes") or [])]})
+    scored = dict(scored)
+    scored.update({k: old.get(k) for k in ("images", "changed_paths_total", "attack_paths_total",
+                                           "runtime_snapshots", "cross_check")
+                   if k in old})
+    scored["rejudged"] = {"axes": list(axes) or "all", "at": history[-1]["replaced_at"]}
+    meta["reward"] = scored
+    ep.write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+    for name, run in verdict.get("runs", {}).items():
+        run.pop("transcript", None)
+    (bundle / "image-judgement.json").write_text(
+        json.dumps(verdict, ensure_ascii=False, indent=1))
+    print(f"  [write] {ep}: value {old.get('value')} -> {scored.get('value')}")
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description="score one episode's machine, axis by axis")
@@ -601,6 +637,11 @@ def main() -> None:
     ap.add_argument("--audit", default="", help="episode audit log; commands are read from it")
     ap.add_argument("--command", action="append", default=[], help="a command, for testing")
     ap.add_argument("--axis", action="append", default=[], help="only these axes")
+    ap.add_argument("--write", action="store_true",
+                    help=("write the verdict back into the bundle's episode.json, keeping the "
+                          "score it replaces under reward_history. Without this a re-judge only "
+                          "prints, which left a third of the dataset carrying scores that had "
+                          "already been shown to be wrong."))
     ap.add_argument("--hash-check", action="store_true")
     ap.add_argument("-q", "--quiet", action="store_true")
     a = ap.parse_args()
@@ -636,7 +677,10 @@ def main() -> None:
             for r in reads:
                 print(f"!! {ax} read the product's own state: {r['tool']} {r['path']} "
                       f"(removed {r.get('redacted_fields') or 'nothing'})")
-        print(json.dumps(rw.score(verdict), indent=1, ensure_ascii=False))
+        scored = rw.score(verdict)
+        print(json.dumps(scored, indent=1, ensure_ascii=False))
+        if a.write and bundle:
+            _write_back(bundle, verdict, scored, tuple(a.axis))
     finally:
         # Reading a snapshot mounts it. Three runs of this command without the unmount left nine
         # nbd mounts on the box, which is how `du` once reported 50 GB for a 4.8 GB store. The

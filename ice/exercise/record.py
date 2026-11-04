@@ -153,9 +153,24 @@ def probe_exec(commands: List[str]) -> List[Dict[str, Any]]:
             "print(json.dumps(out, default=str))\n"
             "EOF\n")
         p_ = vsh(script, label=f"probe-exec {command}", timeout=120)
-        out.append({"command": command, "returncode": p_.returncode,
+        # Whether the command ran, which is not the same as whether the probe script exited 0. Both
+        # are kept: the first three attempts all exited 0 while changing nothing -- once on an
+        # import error, once refused by the gate, once left pending with nobody to approve it.
+        ran, detail = False, ""
+        try:
+            res = json.loads((p_.stdout or "")[(p_.stdout or "").find("{"):])
+        except (ValueError, json.JSONDecodeError):
+            detail = "the probe printed no result object"
+        else:
+            after = res.get("after_approval") or {}
+            ran = (after.get("status") == "executed"
+                   or (res.get("content") or {}).get("decision") == "AUTO")
+            detail = (res.get("error") or after.get("status")
+                      or (res.get("content") or {}).get("decision") or "")
+        out.append({"command": command, "executed": ran, "outcome": str(detail)[:200],
+                    "script_returncode": p_.returncode,
                     "stdout": (p_.stdout or "")[-400:], "stderr": (p_.stderr or "")[-200:]})
-        print(f"  [probe] {command} -> rc={p_.returncode} {(p_.stdout or '').strip()[-160:]}")
+        print(f"  [probe] {command} -> {'EXECUTED' if ran else 'did not run'}: {detail}"[:200])
     return out
 
 

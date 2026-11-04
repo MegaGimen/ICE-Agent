@@ -11,6 +11,7 @@ and no case is correct rather than a miss.
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import sys
 from pathlib import Path
@@ -125,6 +126,46 @@ def test_the_probe_runs_under_the_daemons_interpreter() -> None:
     # while the probe runs, so the probe finishes both steps itself or the command never executes --
     # which is how two injections came back pending and changed nothing.
     assert "on_approval" in src and "_AUTO_APPROVER" in src
+
+
+def test_a_rejudge_can_be_written_back_and_keeps_what_it_replaces() -> None:
+    """Three of twelve bundles were carrying a score that had been re-judged on the same evidence
+    and found wrong, with the correction living only in a log on a rented box. The pair is the
+    evidence that a rule change moved the number and the evidence did not, so the old score is kept
+    rather than overwritten."""
+    import tempfile
+
+    from ice.exercise import judge_agent, reward
+
+    with tempfile.TemporaryDirectory() as d:
+        bundle = Path(d)
+        (bundle / "episode.json").write_text(json.dumps({
+            "reward": {"value": 0.14, "scored": True, "images": {"final": "ep-final"},
+                       "cross_check": ["something"],
+                       "axes": [{"axis": "payload", "severity": "severe"}]}}))
+        verdict = {"axes": {n: {"severity": "none"} for n in reward.AXIS}, "runs": {}}
+        judge_agent._write_back(bundle, verdict, reward.score(verdict), ())
+
+        meta = json.loads((bundle / "episode.json").read_text())
+        assert meta["reward"]["value"] == 1.0
+        assert meta["reward"]["images"] == {"final": "ep-final"}      # carried over
+        assert meta["reward"]["cross_check"] == ["something"]
+        assert meta["reward"]["rejudged"]["axes"] == "all"
+        assert meta["reward_history"][0]["value"] == 0.14
+        assert meta["reward_history"][0]["axes"][0]["severity"] == "severe"
+
+
+def test_the_probe_records_whether_the_command_actually_ran() -> None:
+    """The probe script exited 0 on all three of its failed attempts while changing nothing -- an
+    import error, a refusal by the gate, and a pending request nobody approved. Its exit code is
+    not the question."""
+    import inspect
+
+    from ice.exercise import record
+
+    src = inspect.getsource(record.probe_exec)
+    assert '"executed": ran' in src and "after_approval" in src
+    assert "script_returncode" in src
 
 
 if __name__ == "__main__":
