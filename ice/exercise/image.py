@@ -48,16 +48,28 @@ def release() -> None:
     vm.umount_all()
 
 
+def episode_of(label: str) -> str:
+    """The episode a snapshot label belongs to: `<episode>-clean` and `<episode>-live` share one."""
+    return label.rsplit("-", 1)[0] if "-" in label else label
+
+
 def exists_now(path: str, fallback: str) -> Tuple[bool, str]:
     """Is this path on the machine at this moment, and what did we ask?
 
     While the VM is up the question is answered inside it. Once it is shut down -- which is when a
     snapshot is taken -- the final snapshot *is* the machine as it last was, so that is the honest
     source and the result says so rather than implying a live check.
+
+    Only a VM belonging to the same episode is asked. A running VM from some other episode is a
+    different machine and can answer nothing about this one, and there is usually one around: a
+    leftover from an aborted run sat on the box holding its own overlay while this episode's
+    snapshots were being re-read, and without this check every path's present-day existence would
+    have been read off it.
     """
     from ice.exercise import vm
+    want = episode_of(fallback)
     for label in vm.overlays():
-        if vm.running(label):
+        if episode_of(label) == want and vm.running(label):
             p = vm.ssh(["test", "-e", path], check=False, timeout=15)
             return p.returncode == 0, f"live:{label}"
     return (root(fallback) / path.lstrip("/")).exists(), f"snapshot:{fallback}"
@@ -152,12 +164,18 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
             "mtime_only": mtime_only, "retouched": retouched}
 
 
-def changes(a: str, b: str, hash_check: bool = False, live: bool = True) -> List[Dict[str, Any]]:
+def changes(a: str, b: str, hash_check: bool = False, live: bool = True,
+            now: str = "") -> List[Dict[str, Any]]:
     """The union of paths from before and after, each annotated with whether it is there now.
 
     The union is the point for deletions: a file the episode removed has a diff but nothing left to
     look at, so a list built from the machine's present contents would hide exactly the changes most
     worth seeing.
+
+    `now` names the snapshot that answers "is it there at this moment", and defaults to `b`. It
+    matters for the attack's own diff: T1-T0 says what the attack put on the machine, and the useful
+    extra column on that list is whether each of those paths survived to T2, not whether it was
+    there in T1 -- which it was, by construction.
     """
     d = diff(a, b, hash_check=hash_check)
     ia, ib = index(a), index(b)
@@ -171,8 +189,64 @@ def changes(a: str, b: str, hash_check: bool = False, live: bool = True) -> List
                    "size_before": ea[1] if ea else None,
                    "size_after": eb[1] if eb else None}
             if live:
-                row["exists_now"], row["exists_now_source"] = exists_now(path, b)
+                row["exists_now"], row["exists_now_source"] = exists_now(path, now or b)
             out.append(row)
+    return out
+
+
+def named_diffs(t0: str, t1: str, t2: str, hash_check: bool = False) -> Dict[str, Any]:
+    """The two diffs the judge is given up front, under the names it is told to use.
+
+      before   T1 - T0, the healthy machine against the machine with the attack on it. Whatever is
+               in here IS the attack; nothing in it is the agent's doing.
+      after    T2 - T0, the healthy machine against what the agent left behind.
+
+    Both are needed and neither substitutes for the other. T2 - T0 alone cannot distinguish an
+    artifact the agent failed to clear from one it never had -- and it shows nothing at all for a
+    file the attack touched that the agent restored exactly, which is the case most worth crediting.
+    On the `before` list, `exists_now` is answered against T2, so each of the attack's paths carries
+    whether it survived the episode.
+    """
+    return {"snapshots": {"T0": t0, "T1": t1, "T2": t2},
+            "before": changes(t0, t1, hash_check=hash_check, now=t2),
+            "after": changes(t0, t2, hash_check=hash_check)}
+
+
+def listdir(path: str, snapshots: Dict[str, str]) -> Dict[str, Any]:
+    """The union of one directory's entries across several snapshots, each marked where it exists.
+
+    `snapshots` maps the name the caller uses (T0, T1, T2) to the snapshot label behind it. An entry
+    present in T0 and T1 but not T2 was deleted during the episode and has nothing left to look at
+    on the machine, which is exactly what has to be visible: a listing of the live machine cannot
+    show a deletion, and that is the kind of change most worth seeing.
+    """
+    out: Dict[str, Any] = {"path": path, "snapshots": dict(snapshots)}
+    kinds = {FILE: "file", DIR: "dir", LINK: "symlink"}
+    seen: Dict[str, Dict[str, Any]] = {}
+    present: List[str] = []
+    for name, label in snapshots.items():
+        d = root(label) / path.lstrip("/")
+        if not d.is_dir():
+            continue
+        present.append(name)
+        for child in sorted(d.iterdir()):
+            try:
+                st = child.lstat()
+            except OSError:
+                continue
+            kind = LINK if child.is_symlink() else DIR if child.is_dir() else FILE
+            row = seen.setdefault(child.name, {"name": child.name, "in": [], "kind": {},
+                                               "size": {}})
+            row["in"].append(name)
+            row["kind"][name] = kinds[kind]
+            row["size"][name] = st.st_size
+    for row in seen.values():
+        row["gone"] = [n for n in snapshots if n in present and n not in row["in"]]
+    out["directory_in"] = present
+    out["count"] = len(seen)
+    out["entries"] = [seen[k] for k in sorted(seen)]
+    if not present:
+        out["error"] = f"{path} is not a directory in any of {list(snapshots)}"
     return out
 
 

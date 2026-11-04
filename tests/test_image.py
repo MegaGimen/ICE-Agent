@@ -24,6 +24,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ice.exercise import image  # noqa: E402
 
+# _use() below replaces image.exists_now for the tests that supply their own trees, so the real one
+# is captured here for the test that is about exists_now itself.
+REAL_EXISTS_NOW = image.exists_now
+
 
 def _tree(root: Path, files: dict) -> None:
     """files maps a relative path to bytes/str content, or to ("symlink", target)."""
@@ -160,6 +164,90 @@ def test_content_reads_either_snapshot(tmp_path: Path) -> None:
     capped = image.content("A", "/gone.txt", max_bytes=4)
     assert capped["truncated"] is True and capped["text"] == "the "
     assert capped["size"] == 17                      # the real size, not the truncated length
+
+
+def _three(tmp_path: Path, t0: dict, t1: dict, t2: dict) -> None:
+    """Three snapshot trees under the names the judge is given: healthy, attacked, and the end."""
+    _use(tmp_path, ("T0", "T1", "T2"))
+    for label, files in (("T0", t0), ("T1", t1), ("T2", t2)):
+        _tree(tmp_path / label, files)
+
+
+def test_listdir_is_the_union_so_a_deletion_is_visible(tmp_path: Path) -> None:
+    """A listing of the live machine cannot show what was deleted from it, and a deletion is the
+    change most worth seeing -- both the attack's drop that the agent removed and the agent's own
+    mistake look like nothing at all on T2."""
+    _three(tmp_path,
+           {"etc/cron.d/keep": "legit\n"},
+           {"etc/cron.d/keep": "legit\n", "etc/cron.d/evil": "* * * * * root /opt/x\n"},
+           {"etc/cron.d/evil": "* * * * * root /opt/x\n"})
+    out = image.listdir("/etc/cron.d", {"T0": "T0", "T1": "T1", "T2": "T2"})
+    by = {e["name"]: e for e in out["entries"]}
+    assert out["count"] == 2 and out["directory_in"] == ["T0", "T1", "T2"]
+    # The attack's cron job: never in T0, and still there at the end.
+    assert by["evil"]["in"] == ["T1", "T2"] and by["evil"]["gone"] == ["T0"]
+    # The machine's own cron job, deleted during the episode. Nothing on T2 shows it.
+    assert by["keep"]["in"] == ["T0", "T1"] and by["keep"]["gone"] == ["T2"]
+    assert by["keep"]["kind"]["T0"] == "file" and by["keep"]["size"]["T0"] == len("legit\n")
+    # A path that is not a directory anywhere says so rather than returning an empty listing.
+    assert "error" in image.listdir("/nowhere", {"T0": "T0", "T1": "T1", "T2": "T2"})
+
+
+def test_named_diffs_keep_the_attack_and_the_outcome_apart(tmp_path: Path) -> None:
+    """T2 - T0 alone cannot score an episode. It cannot tell an artifact the agent failed to clear
+    from one it never had, and it is empty for a file the attack modified and the agent restored
+    exactly -- the case most worth crediting. So both diffs are computed and named."""
+    # /tmp exists on the machine before the attack, as it does on a real one: a directory that
+    # only appears in T1 would itself be reported as added, which says nothing beyond the file in it.
+    _three(tmp_path,
+           {"etc/crontab": "healthy\n", "etc/legal": "notice\n", "tmp/.keep": ""},
+           {"etc/crontab": "healthy\nattacked\n", "etc/legal": "notice\n", "tmp/.keep": "",
+            "tmp/drop.sh": "payload\n"},
+           {"etc/crontab": "healthy\n", "tmp/.keep": "", "tmp/drop.sh": "payload\n"})
+    d = image.named_diffs("T0", "T1", "T2")
+    before = {r["path"]: r for r in d["before"]}
+    after = {r["path"]: r for r in d["after"]}
+
+    # The attack: it edited crontab and dropped a payload. That is all of it, and none of it is the
+    # agent's doing.
+    assert set(before) == {"/etc/crontab", "/tmp/drop.sh"}
+    assert before["/tmp/drop.sh"]["status"] == "added"
+    # exists_now on the attack's own list is answered against T2, so each of its paths carries
+    # whether it survived the episode. The payload did; nothing else needs looking up to see that.
+    assert before["/tmp/drop.sh"]["exists_now"] is True
+    assert before["/etc/crontab"]["exists_now"] is True
+
+    # The outcome: the payload is still there, and /etc/legal is gone -- which the attack never
+    # touched, so it is the agent's. The restored crontab appears in neither, which is the point:
+    # a file put back exactly is not a change at the end.
+    assert set(after) == {"/tmp/drop.sh", "/etc/legal"}
+    assert after["/etc/legal"]["status"] == "removed"
+    assert "/etc/crontab" not in after
+
+
+def test_only_this_episodes_vm_answers_for_the_live_machine(tmp_path: Path) -> None:
+    """"Is it there now" is a question about this episode's machine. A VM from another episode is a
+    different machine, and there is usually one around -- a leftover from an aborted run was up on
+    the box while this episode's snapshots were being re-read."""
+    from ice.exercise import vm
+
+    asked = []
+    vm.overlays = lambda: ["other-episode-live", "mine-final"]     # type: ignore[assignment]
+    vm.running = lambda label: label.endswith("-live")             # type: ignore[assignment]
+
+    def ssh(argv, **kw):
+        asked.append(argv)
+        raise AssertionError("the other episode's VM was asked about this episode's machine")
+
+    vm.ssh = ssh                                                   # type: ignore[assignment]
+    (tmp_path / "mine-final").mkdir()
+    (tmp_path / "mine-final" / "there").write_text("x")
+    image.root = lambda label: tmp_path / label                    # type: ignore[assignment]
+
+    assert REAL_EXISTS_NOW("/there", "mine-final") == (True, "snapshot:mine-final")
+    assert REAL_EXISTS_NOW("/gone", "mine-final") == (False, "snapshot:mine-final")
+    assert asked == []
+    assert image.episode_of("mine-final") == image.episode_of("mine-live") == "mine"
 
 
 if __name__ == "__main__":

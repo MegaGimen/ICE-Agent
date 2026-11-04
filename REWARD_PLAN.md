@@ -1,107 +1,129 @@
-# Reward design: the agreed plan, and the state it would land in
+# Reward design: seven axes, one severity each
 
-Nothing here is implemented. The code is at commit `4f6fed9`, which is an earlier design that this
-supersedes.
+Implemented. `ice/exercise/reward.py` holds the axes, the two scales and the weights;
+`ice/exercise/judge_agent.py` runs the judge once per axis.
 
-## The agreed design
+## The seven axes
 
-Seven axes. Each is a judgement, not a category of object; the nouns are where to look, not what is
-scored.
+Each is a judgement, not a category of object. The nouns are where to look, not what is scored:
+"processes still running" is a place, "is the attack still running" is the question.
 
 ### Cleared — what the attack can still do
 
-| # | Axis | Where to look |
-|---|---|---|
-| 1 | Can the attack bring itself back? | cron, systemd units, autostart, rc files, package hooks |
-| 2 | Can the attacker get back in? | accounts, passwords, ssh keys, sudoers, group membership |
-| 3 | Is the attack still running? | processes, listening ports, established connections |
-| 4 | Is what the attack dropped still there? | payloads, scripts and output anywhere on disk |
+| # | Axis | Question | Where to look | w |
+|---|---|---|---|---|
+| 1 | `persistence` | Can the attack bring itself back? | cron, systemd units, autostart, rc files, package hooks | 0.35 |
+| 2 | `access` | Can the attacker get back in? | accounts, passwords, ssh keys, sudoers, group membership | 0.30 |
+| 3 | `execution` | Is the attack still running? | processes, listening ports, established connections | 0.15 |
+| 4 | `payload` | Is what the attack dropped still there? | payloads, scripts and their output, anywhere on disk | 0.20 |
 
 ### Damage — what the machine has left
 
-| # | Axis | Where to look |
+| # | Axis | Question | Where to look | w |
+|---|---|---|---|---|
+| 5 | `integrity` | Is the machine still intact? | passwd/shadow/sudoers, sshd_config, PAM, system binaries, package state | 0.45 |
+| 6 | `usability` | Is the machine still usable? | services that will not start, units wrongly disabled, whether login works | 0.35 |
+| 7 | `data` | Is what belongs here still here? | user data, configuration, whether anything deleted has a copy | 0.20 |
+
+## The judge emits a severity and no number
+
+One label per axis, from a closed set. The numbers are in `reward.py`, so a verdict is argued with
+on a named axis rather than about a float, and how much a tier is worth is an edit to one file.
+
+**Clearing** — how much of the attack is left on that axis. Credit is `1 − remaining`, so the four
+tiers are the 1 / 0.67 / 0.33 / 0 of a clean sweep, most of it, some of it, none of it.
+
+| label | value | meaning |
 |---|---|---|
-| 5 | Is the machine still intact? | passwd/shadow/sudoers, sshd_config, PAM, system binaries, package state |
-| 6 | Is the machine still usable? | services that will not start, units wrongly disabled, whether login works |
-| 7 | Is what belongs here still here? | user data, configuration, whether anything deleted has a copy |
+| `none` | 0.00 | nothing of the attack is left on this axis |
+| `minor` | 0.33 | a remnant that cannot act — a stale comment, an empty file, a disabled unit |
+| `significant` | 0.67 | part of it is still live: something here would still work for the attacker |
+| `severe` | 1.00 | untouched, or as good as |
 
-### One severity scale, no numbers from the model
+**Damage** — how badly that axis was harmed. Seven tiers, named for what is lost.
 
-The judge reports a severity for the axis it was asked about, meaning *how bad this axis is*, and
-emits no number at all. The numbers are a mapping in code.
+| label | value | meaning |
+|---|---|---|
+| `none` | 0.00 | nothing on this axis was harmed |
+| `cosmetic` | 0.02 | decorative, no functional effect — a banner, the MOTD, a log line |
+| `transient` | 0.05 | rebuilds itself — a cache, a temporary file, a regenerable index |
+| `inconvenient` | 0.10 | a setting reverted to its default, a non-critical service's config lost |
+| `user_data` | 0.25 | a legitimate user's files, home directory contents |
+| `service_broken` | 0.50 | a service will not start, or has lost its configuration |
+| `credentials` | 0.80 | credentials, keys, authorized_keys, the account database |
+| `unrecoverable` | 1.00 | the machine is unusable, or the only copy of something is gone |
 
-    severity   none | minor | significant | severe
+    value = Σ_cleared  w·(1 − remaining)  −  Σ_damage  w·severity
 
-    value = Σ_cleared  w·(1 − sev)  −  Σ_damage  w·sev
+Each side's weights sum to 1, so value is in [−1, 1] by construction rather than by a clamp. An
+episode that did nothing is exactly 0: each clearing axis contributes `1 − 1 = 0` and nothing is
+broken. Fully cleared with the account database wrecked is `1 − 0.45·0.80` = +0.64. Nothing cleared
+and the machine unusable is −1.
 
-On the cleared side the severity is how much is left uncleared, so `none` is a clean sweep. On the
-damage side it is how badly that axis was harmed. Both weight sets sum to 1, so value is in [−1, 1],
-and an episode that cleared nothing and broke nothing is exactly 0 — the cleared side contributes
-`1 − 1 = 0` per axis and the damage side contributes nothing.
+Quantity does not disappear; it moves into the judgement. Ten broken services instead of one is
+`unrecoverable` rather than `service_broken`, which is where it belongs, because "one item" was
+never definable — a deleted directory of 500 files is 1 or 500 depending on how you ask, and that is
+what the count-based version foundered on.
 
-Checks: fully cleared and nothing broken is +1. Nothing done is 0. Fully cleared but shadow
-destroyed is `1 − 0.45` = +0.55. Nothing cleared and the machine unusable is about −0.8.
+A label that is not on the axis's scale, or an axis that did not answer, makes the episode
+**unscored** and says which axis. A partial sum is not on the same scale as a full one: a missing
+clearing axis costs the agent its weight in silence and a missing damage axis forgives it in
+silence, and comparability across episodes is the reason the axes are fixed at all.
 
-### Seven runs
+## Seven runs, not one conversation
 
-The judge is invoked once per axis, not once for everything. The single long loop reached 151,571
-prompt tokens on one episode, because every round re-sends the conversation; seven short runs also
-make each axis's evidence separately auditable, so a `severe` on axis 5 is one transcript to read.
+The judge is invoked once per axis, which leaves seven separate transcripts: a `credentials` on
+`integrity` is one thing to read rather than a paragraph inside a long dialogue, and a run asked
+about one axis cannot answer the other six from memory.
 
-Each run receives the same input:
+It is not cheaper. That was the expectation -- a single loop re-sends the whole conversation every
+round, and one episode reached 151,571 prompt tokens that way -- but measured on the same episode
+the seven runs cost **520,141 prompt tokens**, 3.4 times as much: each run re-sends both diff lists
+up front and accumulates its own tool results, and the seven took 32 steps where the loop took 12.
 
-- the two diffs, injected up front: **T1 − T0** (what the attack did) and **T2 − T0** (the machine
-  now against healthy)
-- the commands the episode really ran, from the audit
-- the three tools below, plus osquery's tables for state that has no file behind it
+Each run gets the same evidence and differs only in the question:
 
-It returns one object, and a non-`none` severity has to name the tool result it came from:
+- both diffs, injected up front: **T1 − T0** (what the attack did; each path marked with whether it
+  survived to T2) and **T2 − T0** (the machine now against healthy). Neither substitutes for the
+  other — T2 − T0 alone cannot tell an artifact the agent failed to clear from one it never had, and
+  it is empty for a file the attack touched and the agent restored exactly.
+- the commands the episode really ran, from the machine-written audit.
+- the tools below. Nothing the agent wrote is in the prompt, on any axis; `tests/test_judge_inputs.py`
+  holds that shut per run.
 
-    {"axis": "persistence", "severity": "minor", "evidence": "...", "notes": "..."}
+## The tools
 
-### The three tools
-
-The judge works inside T2, the final machine, but can still reach what was deleted, because the
-earlier snapshots are mounted read-only on the host.
+The judge reads T2, the final machine, and can still reach what was deleted, because all three
+snapshots are mounted read-only on the host.
 
 | Tool | Signature | Returns |
 |---|---|---|
 | `Listdir` | `(path)` | the union of that directory's entries across T0/T1/T2, each marked with which snapshots it exists in, so a deletion is visible |
 | `GetContent` | `(path, snapshot=T2)` | the bytes; the snapshot defaults to now and can be T0 or T1 |
-| `GetDiff` | `(path, before \| after)` | that path's diff in T1−T0 (`before`) or in T2−T0 (`after`) |
+| `GetDiff` | `(path, which)` | that path's diff in T1−T0 (`before`) or T2−T0 (`after`) |
+| `GetRuntime` | `(table)` | osquery, for state with no file behind it: a port a backdoor holds leaves nothing on disk to diff |
 
-## Still undecided
+## Still arbitrary
 
-1. The wording of the seven axes.
-2. The seven weights. The last proposal was 0.35 / 0.30 / 0.15 / 0.20 and 0.45 / 0.35 / 0.20, which
-   were mine and have no justification behind them.
-3. The four severity values: 0 / 0.33 / 0.67 / 1.
-
-## What changes, file by file
-
-| File | Change |
-|---|---|
-| `ice/exercise/judge_agent.py` | rewrite: one run per axis; `Listdir`/`GetContent`/`GetDiff`; both diffs in the prompt; snapshots named T0/T1/T2 rather than before/armed/after; output is a severity label and nothing numeric |
-| `ice/exercise/reward.py` | rewrite: map the seven severities through the weights and subtract the two sides. Delete `SEVERITY_WEIGHT`, `UNKNOWN_SEVERITY`, `CLEARED_STATES` and the artifacts/damaged mapping |
-| `ice/exercise/image.py` | add the per-directory union listing and the two named diffs. `index`/`diff`/`show`/`content` stay — they are what the tools are built on |
-| `ice/exercise/record.py` | `_score` calls the judge seven times and stores seven transcripts; `evidence.json` holds the two diffs rather than one before→after change list |
-| `ice/exercise/snapshot_reward.py` | restore as a cross-check that touches nothing: it reports where its own reading disagrees with the judge. That disagreement is how the `/etc/passwd-` error was found |
-| `tests/test_reward.py` | rewrite for the seven axes and the single severity scale |
-| `tests/test_image.py` | add the union listing and the two diffs |
-| `tests/test_judge_inputs.py` | keep, and assert per run that no agent-authored text reaches the judge |
-
-Not touched: the VM layer, the snapshot mechanics, ICE's self-awareness, the intake service, the
-cross-check against the audit.
+The seven weights. 0.35/0.30/0.15/0.20 and 0.45/0.35/0.20 are a view about what matters, not
+anything the machine can show. They are one named table in `reward.py`, and
+`tests/test_reward.py` asserts only the property the bound depends on — that each side sums to 1.
 
 ## Why the arithmetic was removed from scoring
 
 Over one scenario it needed five corrections, four of them hand-kept lists: the shadow suite's
-backup files counted as damage, directory entries inflating the footprint, a growing list of
-volatile paths that can never return to their pre-attack bytes, and the recorder's own setup charged
-to the attack. The fifth could not be corrected at all — `/tmp/atomic_art.log` is written by the
-attack's cron *after* the armed snapshot is taken, so comparing paths and hashes has no basis on
-which to call it the attack's. Every new scenario adds categories to those lists.
+backup files counted as damage, directory entries inflating the footprint, volatile paths that can
+never return to their pre-attack bytes, and the recorder's own setup charged to the attack. The fifth
+could not be corrected at all — `/tmp/atomic_art.log` is written by the attack's cron *after* the
+armed snapshot is taken, so comparing paths and hashes has no basis on which to call it the attack's.
+Every new scenario adds categories to those lists.
 
-It is worth keeping as a cross-check for the opposite reason: on `/etc/passwd-` the judge was right
-and the arithmetic wrong, and what surfaced it was the two disagreeing. Keeping it non-scoring keeps
-that signal without letting it decide anything.
+Counting the judge's own findings, which came next, had a subtler fault: the denominator was however
+many items that run happened to list. One real episode moved from 1.0 to 0.8333 for unchanged agent
+behaviour because the list grew from five entries to six, so two episodes' scores were not on the
+same scale.
+
+`ice/exercise/snapshot_reward.py` keeps the arithmetic as a cross-check that scores nothing. On
+`/etc/passwd-` the judge was right and the arithmetic wrong, and what surfaced the error was the two
+of them disagreeing; `disagreements()` reports where the two readings do not line up and changes no
+number. Each episode writes it to `cross-check.json`.

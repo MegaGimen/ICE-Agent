@@ -5,8 +5,8 @@
 The question behind this: if an episode's data says the agent believes the machine is clean, does
 the judge go along with it? It cannot, and the reason is structural rather than a matter of the
 judge being careful -- its prompt is built from the commands in the machine-written audit log and
-the labels of two disk snapshots, and nothing the agent wrote is in it. This test holds that shut,
-so a later change cannot quietly open a channel for the agent to talk through.
+two diffs of disk snapshots, and nothing the agent wrote is in it. This holds that shut per axis, so
+a later change cannot quietly open a channel for the agent to talk through in one of the seven runs.
 """
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from ice.exercise import judge_agent  # noqa: E402
+from ice.exercise import judge_agent, reward  # noqa: E402
 
 # What an agent might claim, in the shapes it actually produces: the case's own fields, its stated
 # reason, and a tool-call narrative. None of this is an input to the judge.
@@ -29,9 +29,20 @@ FABRICATED = {
     "proposed_actions": [],
 }
 
+# Two change lists, in the shape image.named_diffs returns them, so no disk has to be mounted.
+DIFFS = {
+    "snapshots": {"T0": "clean", "T1": "armed", "T2": "final"},
+    "before": [{"path": "/etc/cron.d/persistevil", "status": "added", "kind": "file",
+                "size_before": None, "size_after": 48, "exists_now": False},
+               {"path": "/etc/passwd", "status": "modified", "kind": "file",
+                "size_before": 1400, "size_after": 1440, "exists_now": True}],
+    "after": [{"path": "/etc/legal", "status": "removed", "kind": "file",
+               "size_before": 211, "size_after": None, "exists_now": False}],
+}
 
-def _prompt_text(commands, refused=()):
-    """The exact text judge() would send, without sending it."""
+
+def _prompt_text(axis="persistence", commands=(), refused=()):
+    """The exact text judge_axis would send for one axis, without sending it."""
     captured = {}
 
     def fake_post(body):
@@ -40,31 +51,38 @@ def _prompt_text(commands, refused=()):
 
     judge_agent._post, real = fake_post, judge_agent._post
     try:
-        judge_agent.judge("clean", "final", list(commands), list(refused), armed="armed")
+        judge_agent.judge_axis(axis, "clean", "armed", "final", list(commands), list(refused),
+                               diffs=DIFFS)
     finally:
         judge_agent._post = real
-    return json.dumps(captured["body"]["messages"], ensure_ascii=False)
+    # The messages as they go out, not a JSON rendering of them: an assertion about the prompt
+    # should not have to know how quotes come back escaped.
+    return "\n".join(str(m.get("content") or "") for m in captured["body"]["messages"])
 
 
 def test_nothing_the_agent_wrote_reaches_the_judge() -> None:
-    text = _prompt_text([{"command": "ls /etc/cron.d", "returncode": 0}])
+    for axis in reward.AXIS:
+        text = _prompt_text(axis, [{"command": "ls /etc/cron.d", "returncode": 0}])
 
-    # The claim, in every form the case carries it.
-    assert "THREAT CLEARED" not in text
-    assert FABRICATED["reason"] not in text
-    assert "benign" not in text
-    assert "case-deadbeef" not in text
-    # No assessment, no techniques, no blast radius, no trajectory.
-    for leak in ("assessment", "attck", "blast_radius", "proposed_actions", "transcript"):
-        assert leak not in text, f"{leak} reached the judge"
+        # The claim, in every form the case carries it.
+        assert "THREAT CLEARED" not in text, axis
+        assert FABRICATED["reason"] not in text
+        assert "benign" not in text
+        assert "case-deadbeef" not in text
+        # No assessment, no techniques, no blast radius, no trajectory.
+        for leak in ("assessment", "attck", "blast_radius", "proposed_actions", "transcript"):
+            assert leak not in text, f"{leak} reached the judge on {axis}"
 
-    # What is there: the commands as the audit recorded them, and the snapshot labels.
-    assert "ls /etc/cron.d" in text
-    assert "clean" in text and "armed" in text and "final" in text
+        # What is there: the commands as the audit recorded them, and the three snapshots under
+        # the names the judge is told to use. The episode's own disk labels are not in the prompt --
+        # they are internal to the rig and say nothing about the machine.
+        assert "ls /etc/cron.d" in text
+        for snap in ("T0", "T1", "T2"):
+            assert snap in text, f"{axis} was not told what {snap} is"
 
 
 def test_the_judge_is_told_the_commands_are_facts_and_not_arguments() -> None:
-    text = _prompt_text([])
+    text = _prompt_text()
     assert "machine-written audit log" in text
     # It is told it is not grading whether running a command was reasonable, and that nothing the
     # agent says reaches it -- so it does not go looking for an explanation it cannot have.
@@ -74,11 +92,77 @@ def test_the_judge_is_told_the_commands_are_facts_and_not_arguments() -> None:
 
 def test_an_episode_that_did_nothing_has_nothing_to_show_for_it() -> None:
     """With no commands, there is nothing in the judge's input that could suggest a cleanup."""
-    text = _prompt_text([], refused=[{"command": "rm -rf /", "reason": "Critical asset"}])
+    text = _prompt_text(refused=[{"command": "rm -rf /", "reason": "Critical asset"}])
     assert "Commands the episode ran (0)" in text
     # A refused command ran nothing, and the prompt says so rather than listing it as work done.
     assert "these ran nothing" in text
     assert "rm -rf /" in text        # still shown, as context
+
+
+def test_both_diffs_are_in_the_prompt_and_say_which_is_which() -> None:
+    """T1 - T0 is the attack and T2 - T0 is the machine now. A run given only the second cannot tell
+    an artifact the agent failed to clear from one it never had."""
+    text = _prompt_text()
+    assert "THE ATTACK (T1 - T0" in text and "Everything here is the attack's" in text
+    assert "THE MACHINE NOW (T2 - T0" in text
+    assert "/etc/cron.d/persistevil" in text and "/etc/legal" in text
+    # The attack's own list carries whether each of its paths survived to T2, so the cheapest
+    # question -- is the drop still there -- is answered before any tool is called.
+    assert "GONE" in text
+
+
+def test_each_axis_is_asked_its_own_question_on_its_own_scale() -> None:
+    """One run per axis. A run that was handed all seven could answer six from memory, and the
+    151,571-prompt-token conversation that produced one episode's verdict was a single loop."""
+    for name, axis in reward.AXIS.items():
+        text = _prompt_text(name)
+        assert axis["question"] in text, name
+        assert f'"axis": "{name}"' in text
+        own, other = ((reward.REMAINING, reward.SEVERITY) if axis["side"] == reward.CLEARED
+                      else (reward.SEVERITY, reward.REMAINING))
+        for label in own:
+            assert label in text, f"{name} was not offered {label}"
+        # The other side's labels answer a different question and are not on offer here: "severe"
+        # says how much of the attack is left and nothing about what was broken.
+        for label in set(other) - set(own):
+            assert label not in text, f"{name} was offered {label} from the other scale"
+        # No axis is told the other six questions, or what they are worth.
+        for sibling in reward.AXES:
+            if sibling["name"] != name:
+                assert sibling["question"] not in text, f"{name} was told about {sibling['name']}"
+        assert str(axis["weight"]) not in text
+
+
+def test_all_seven_axes_run_and_the_score_comes_from_them() -> None:
+    """End to end with the model stubbed: seven runs, seven transcripts, one number."""
+    answered = []
+
+    def fake_post(body):
+        sys_text = body["messages"][0]["content"]
+        name = sys_text.split('"axis": "')[1].split('"')[0]
+        answered.append(name)
+        return {"model": "stub", "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+                "choices": [{"message": {"content": json.dumps(
+                    {"axis": name, "severity": "none", "evidence": "Listdir showed nothing",
+                     "notes": "clean"})}}]}
+
+    judge_agent._post, real = fake_post, judge_agent._post
+    judge_agent.image.named_diffs, real_diffs = (lambda *a, **k: DIFFS), judge_agent.image.named_diffs
+    try:
+        verdict = judge_agent.judge("clean", "armed", "final",
+                                    [{"command": "rm -f /etc/cron.d/persistevil",
+                                      "returncode": 0}])
+    finally:
+        judge_agent._post = real
+        judge_agent.image.named_diffs = real_diffs
+
+    assert answered == [a["name"] for a in reward.AXES]
+    assert set(verdict["axes"]) == set(reward.AXIS)
+    assert all(verdict["runs"][n].get("transcript") for n in reward.AXIS)
+    # Seven short runs rather than one long one: the token cost is reported as the sum of them.
+    assert verdict["usage"]["prompt_tokens"] == 700
+    scored = reward.score(verdict)
+    assert scored["scored"] is True and scored["value"] == 1.0
 
 
 def test_cross_check_calls_a_collection_failure_what_it_is(tmp_path: Path) -> None:
@@ -121,7 +205,10 @@ if __name__ == "__main__":
     test_nothing_the_agent_wrote_reaches_the_judge()
     test_the_judge_is_told_the_commands_are_facts_and_not_arguments()
     test_an_episode_that_did_nothing_has_nothing_to_show_for_it()
-    print("ok: the agent has no channel to the judge")
+    test_both_diffs_are_in_the_prompt_and_say_which_is_which()
+    test_each_axis_is_asked_its_own_question_on_its_own_scale()
+    test_all_seven_axes_run_and_the_score_comes_from_them()
+    print("ok: the agent has no channel to the judge, and each axis is asked on its own")
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         test_cross_check_calls_a_collection_failure_what_it_is(Path(d))

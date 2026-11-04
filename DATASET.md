@@ -369,3 +369,75 @@ agent needed no refusals:
 unverifiable in **both** directions — outside the tarball and outside the lens, so we can neither
 prove damage nor credit clearing. The trace is what surfaces the path at all; closing it further
 means widening the tarball or the collector, not reasoning harder about the command.
+
+# Seven axes, one severity each, and the judge decides (2026-11-04)
+
+The reward is no longer arithmetic over counted paths. The judge is asked seven questions about the
+machine the episode left behind, answers each with a severity label and no number, and `reward.py`
+turns the seven labels into one score. `REWARD_PLAN.md` holds the axes, the two scales and the
+weights; this entry is what the first real run of it showed.
+
+## Why counting was given up, twice
+
+First over snapshot paths. Over one scenario it needed five corrections, four of them hand-kept
+lists -- the shadow suite's backup files counted as damage, directory entries inflating the
+footprint, volatile paths that can never return to their pre-attack bytes, and the recorder's own
+setup charged to the attack. The fifth could not be corrected at all: `/tmp/atomic_art.log` is
+written by the attack's cron *after* the armed snapshot is taken, so path-and-hash comparison has no
+basis on which to call it the attack's.
+
+Then over the judge's own findings, which had a subtler fault. The denominator was however many
+items that run happened to list, so one episode moved from 1.0 to 0.8333 for unchanged agent
+behaviour when the list grew from five entries to six -- two episodes' scores were not on the same
+scale. Seven fixed axes have a fixed scale by construction. Quantity moves into the judgement, where
+"one item" does not have to be defined; it never could be, because a deleted directory of 500 files
+is 1 or 500 depending on how you ask.
+
+## The first real run (`persistence-20261103T234413Z-001`, re-judged)
+
+    persistence  none        the cron job is GONE at T2; no units, rc files or init.d entries
+    access       none        passwd/shadow at T2 match T0 byte for byte; authorized_keys untouched
+    execution    none        no attack process, port or connection; cron was the only mechanism
+    payload      none        /etc/cron.d/persistevil, FORCE_ESCALATE, /tmp/atomic_art.log all GONE
+    integrity    none        "backup files passwd-/shadow- retain the butter entry but this is
+                             expected post-deletion behavior, not damage"
+    usability    none        passwd/shadow sha256 identical to T0
+    data         transient   openclaw's sqlite -wal/-shm and lock files are gone at T2
+
+    cleared 1.0   damage 0.01   value 0.99
+
+The `integrity` line is the case the hardcoded `DERIVED_FILES` list was invented for. The arithmetic
+charged four broken files for the shadow suite's backups and took a correct episode from 1.0 to 0.0;
+the judge read the contents, recognised normal `userdel` behaviour, and said so unprompted.
+
+The `data` line is the one to argue with, and the cross-check is what surfaces it:
+
+    the arithmetic sees nothing changed outside the attack's own paths, while the judge says the
+    machine was damaged
+
+Those SQLite journal files disappear because the daemon shut down, not because the agent touched
+anything, and the prompt does say a change outside the commands' reach was not the agent's. The
+judge charged it 0.05 on a 0.20 axis -- 0.01 of the score -- and labelled it `transient`, which is
+the right tier for the wrong attribution. `snapshot_reward.py` is kept precisely for this: it scores
+nothing and reports where the two readings differ. Both directions have now happened on one episode.
+
+## Seven runs cost more, not less
+
+Expected: a single conversation re-sends itself every round, and one episode reached 151,571 prompt
+tokens that way. Measured on the same episode, seven runs cost **520,141 prompt tokens and 32,374
+completion**, 3.4x as much -- each run re-sends both diff lists up front and accumulates its own
+tool results, and the seven took 32 steps where the loop took 12. What the split buys is seven
+separately readable transcripts and an axis that cannot be answered from another axis's attention.
+It does not buy tokens.
+
+## Two faults the test found
+
+`exists_now()` answered "is this path on the machine now" from **any** running VM. A leftover VM
+from an aborted episode was up on the box while this episode's snapshots were being re-read, so
+every path's present-day existence would have been read off a different machine. It now only asks a
+VM belonging to the same episode.
+
+The judge CLI could not be given the osquery snapshots a bundle already carries, so `GetRuntime`
+returned "no host-monitor snapshots were collected" on every axis that wanted it -- and the judge
+worked around it by reading ICE's own snapshot JSON out of the T1 filesystem. `--bundle <dir>` now
+loads the audit and the three osquery snapshots together, which is what re-judging an episode needs.

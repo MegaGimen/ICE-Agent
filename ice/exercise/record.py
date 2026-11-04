@@ -523,7 +523,7 @@ EVIDENCE_DIFF_CAP = int(os.environ.get("ICE_EVIDENCE_DIFF_CAP", "20000"))
 
 
 def write_evidence(ep_dir: Path, images: Dict[str, str],
-                   changes: List[Dict[str, Any]]) -> Dict[str, Any]:
+                   diffs: Dict[str, Any]) -> Dict[str, Any]:
     """Store the evidence as the judge's tools return it, so the bundle stands on its own.
 
     Two reasons, and the second is the one that shapes the format. The disks are qcow2 overlays that
@@ -531,41 +531,70 @@ def write_evidence(ep_dir: Path, images: Dict[str, str],
     way early episodes became unscorable once the osquery snapshots their pointers named had aged
     out of a 240-snapshot window. And if this data is ever used to train a judge, its inputs have to
     be the inputs a judge is scored on; the way to make that true by construction is to store the
-    exact objects `list_changes` and `read_diff` hand over, rather than a summary of them.
+    exact objects the tools hand over, rather than a summary of them.
+
+    Both diffs are kept, under the names the judge is given. T2 - T0 alone would not be enough to
+    re-judge from: it cannot tell an artifact the agent failed to clear from one it never had, and
+    it is empty for a file the attack touched and the agent restored exactly.
 
     Diffs are capped per path. A log that grew by megabytes says nothing more in its ten-thousandth
     line, and the cap is recorded alongside so a reader knows the text was cut rather than short.
     """
     from ice.exercise import image
-    base, final = images["baseline"], images["final"]
-    diffs: Dict[str, Any] = {}
-    for row in changes:
-        if row["kind"] == "dir":
-            continue
-        diffs[row["path"]] = image.show(base, final, row["path"],
-                                        max_diff_bytes=EVIDENCE_DIFF_CAP)
+    t0, t1, t2 = images["baseline"], images["armed"], images["final"]
+    bodies: Dict[str, Dict[str, Any]] = {"before": {}, "after": {}}
+    for which, (a, b) in (("before", (t0, t1)), ("after", (t0, t2))):
+        for row in diffs[which]:
+            if row["kind"] == "dir":
+                continue
+            bodies[which][row["path"]] = image.show(a, b, row["path"],
+                                                    max_diff_bytes=EVIDENCE_DIFF_CAP)
     payload = {
         "images": images,
+        "snapshots": {"T0": t0, "T1": t1, "T2": t2},
         "diff_cap_bytes": EVIDENCE_DIFF_CAP,
-        "list_changes": changes,                 # exactly what the list_changes tool returns
-        "read_diff": diffs,                      # exactly what read_diff returns, per path
+        "change_lists": {"before": diffs["before"], "after": diffs["after"]},
+        "GetDiff": bodies,                       # exactly what GetDiff returns, per path per side
     }
     (ep_dir / "evidence.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
     size = (ep_dir / "evidence.json").stat().st_size
-    print(f"  evidence: {len(diffs)} path diffs, {size / 1024:.0f} KiB "
-          f"(the bundle can be re-judged without the disks)")
+    print(f"  evidence: {len(bodies['before'])} attack diffs + {len(bodies['after'])} outcome "
+          f"diffs, {size / 1024:.0f} KiB (the bundle can be re-judged without the disks)")
     return payload
+
+
+def _cross_check_arithmetic(ep_dir: Path, images: Dict[str, str], verdict: Dict[str, Any],
+                            runtime: Dict[str, Any]) -> Dict[str, Any]:
+    """The set arithmetic, read alongside the judge and scoring nothing.
+
+    It is kept for one reason: on /etc/passwd- the judge was right and the arithmetic wrong, and
+    what surfaced the error was the two of them disagreeing. A disagreement here is a prompt to read
+    that axis's transcript, and it changes no number.
+    """
+    from ice.exercise import snapshot_reward as sr
+    files = sr.file_score(images["baseline"], images["armed"], images["final"])
+    rt = None
+    if all(runtime.get(k) for k in ("t0", "t1", "t2")):
+        rt = sr.runtime_score(runtime["t0"], runtime["t1"], runtime["t2"])
+    out = sr.disagreements(files, verdict, rt)
+    out["files"] = files
+    if rt:
+        out["runtime"] = rt
+    (ep_dir / "cross-check.json").write_text(json.dumps(out, ensure_ascii=False, indent=1))
+    for note in out["disagreements"]:
+        print(f"  ?? the arithmetic disagrees with the judge: {note}")
+    return out
 
 
 def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
            commands: List[Dict[str, Any]], refused: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Both halves of the score, each from the evidence that can actually see the thing.
+    """Seven axes, each its own run of the judge, each answered with a severity.
 
     Files come from the whole-filesystem images: every path on the machine, so an artifact left in
     /tmp is as visible as one in /etc. Runtime state comes from osquery and only where there is no
-    file to diff -- an open port, a unit's enabled state. osquery's file tables are not scored any
-    more; they described a ninth of the machine and reported threat_cleared 1.0 for an episode that
-    left /tmp/atomic_art.log behind, because no table of theirs mentions /tmp.
+    file to diff -- an open port, a unit's enabled state. osquery's file tables are not read at all
+    any more; they described a ninth of the machine and once reported a clean sweep for an episode
+    that left /tmp/atomic_art.log behind, because no table of theirs mentions /tmp.
 
     The attack's footprint is derived from the armed image, never declared, so nothing the attack
     did is charged to the agent and nothing has to be said in advance about what the machine holds.
@@ -573,15 +602,11 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     from ice.exercise import image, judge_agent, reward as rw
     base, armed, final = images["baseline"], images["armed"], images["final"]
 
-    # The diffs stay: they are what the judge's tools read. What is gone is using their counts to
-    # define the score. Over one scenario that needed five corrections, four of them hand-kept
-    # lists, and the fifth could not be corrected at all -- an artifact the attack's cron writes
-    # after the armed snapshot gives path-and-hash comparison nothing to attribute it by.
-    changes = image.changes(base, final)
+    diffs = image.named_diffs(base, armed, final)
     (ep_dir / "image-changes.json").write_text(json.dumps(
-        {"images": images, "baseline_to_final": changes,
-         "armed_to_final": image.changes(armed, final)}, ensure_ascii=False, indent=1))
-    write_evidence(ep_dir, images, changes)
+        {"images": images, "baseline_to_armed": diffs["before"],
+         "baseline_to_final": diffs["after"]}, ensure_ascii=False, indent=1))
+    write_evidence(ep_dir, images, diffs)
 
     runtime = {}
     if case:
@@ -589,39 +614,39 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
         if runtime:
             (ep_dir / "runtime-snapshots.json").write_text(json.dumps(
                 {k: bool(v) for k, v in runtime.items()}, indent=1))
-    print(f"  evidence: {len(changes)} changed paths | runtime snapshots: "
+    print(f"  evidence: {len(diffs['before'])} paths the attack changed, "
+          f"{len(diffs['after'])} changed at the end | runtime snapshots: "
           f"{sorted(k for k, v in runtime.items() if v) or 'none'}")
 
-    verdict = judge_agent.judge(base, final, commands, refused, armed=armed, runtime=runtime)
-    transcript = verdict.pop("transcript", None)
+    verdict = judge_agent.judge(base, armed, final, commands, refused, runtime=runtime,
+                                verbose=True)
+    transcripts = {name: run.pop("transcript", None) for name, run in verdict["runs"].items()}
     (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
-    if transcript is not None:
-        (ep_dir / "judge-transcript.json").write_text(json.dumps(
-            {"model": verdict.get("model"), "steps": verdict.get("steps"),
-             "usage": verdict.get("usage"), "messages": transcript},
-            ensure_ascii=False, indent=1))
+    (ep_dir / "judge-transcript.json").write_text(json.dumps(
+        {"model": verdict.get("model"), "usage": verdict.get("usage"),
+         "runs": {name: {"severity": verdict["axes"][name].get("severity"),
+                         "error": verdict["axes"][name].get("error"),
+                         "messages": msgs}
+                  for name, msgs in transcripts.items()}},
+        ensure_ascii=False, indent=1))
 
     out = rw.score(verdict)
-    if verdict.get("error"):
-        print(f"  !! the judge did not answer: {verdict['error']}")
-    else:
-        for a in (verdict.get("artifacts") or []):
-            if str(a.get("state", "")).lower() not in rw.CLEARED_STATES:
-                print(f"    still present: {a.get('path')} — {(a.get('what') or '')[:80]}")
-        for d in out["damaged"]:
-            print(f"    damaged: {d['path']} — {d['severity']} (weight {d['weight']}) "
-                  f"{(d.get('what') or '')[:50]}")
-        print(f"  judge: {out['artifacts_cleared']}/{out['artifacts_found']} artifacts cleared, "
-              f"{len(out['damaged'])} damaged | {verdict.get('steps')} steps, "
-              f"read {len(verdict.get('paths_read') or [])}/{len(changes)} paths")
-    print(f"  score: threat_cleared={out['threat_cleared']} damage={out['damage']} "
-          f"value={out['value']}"
+    for row in out["axes"]:
+        a = rw.AXIS[row["axis"]]
+        print(f"    {row['axis']:<12} {a['question']:<42} "
+              f"{row['severity'] or '!! ' + str(verdict['axes'][row['axis']].get('error'))[:40]}"
+              + ("" if row["contribution"] is None else f"  ({row['side']} {row['contribution']})"))
+        if row["severity"] and row["severity"] != "none" and row.get("evidence"):
+            print(f"                 {str(row['evidence'])[:160]}")
+    print(f"  score: cleared={out['cleared']} damage={out['damage']} value={out['value']}"
           + ("" if out["scored"] else f"  [UNSCORED: {out.get('unscored_reason')}]"))
-    if out.get("inconsistent"):
-        print(f"  !! the judge's headline disagrees with its own findings: {out['inconsistent']}")
-    out.update({"images": images, "changed_paths_total": len(changes),
-                "artifacts": verdict.get("artifacts"),
-                "runtime_snapshots": sorted(k for k, v in runtime.items() if v)})
+
+    arithmetic = _cross_check_arithmetic(ep_dir, images, verdict, runtime)
+    out.update({"images": images,
+                "changed_paths_total": len(diffs["after"]),
+                "attack_paths_total": len(diffs["before"]),
+                "runtime_snapshots": sorted(k for k, v in runtime.items() if v),
+                "cross_check": arithmetic["disagreements"]})
     return out
 
 
