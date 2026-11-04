@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
@@ -332,18 +333,35 @@ class Tools:
         return result
 
 
+RETRIES = int(os.environ.get("ICE_JUDGE_RETRIES", "3"))
+
+
 def _post(body: Dict[str, Any]) -> Dict[str, Any]:
-    req = urllib.request.Request(BASE_URL.rstrip("/") + "/chat/completions",
-                                 data=json.dumps(body).encode(),
-                                 headers={"Content-Type": "application/json",
-                                          "Authorization": "Bearer " + API_KEY})
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-            return json.load(r)
-    except urllib.error.HTTPError as e:
-        return {"_error": f"HTTP {e.code}: {e.read()[:300].decode(errors='replace')}"}
-    except Exception as e:                                # noqa: BLE001
-        return {"_error": f"{type(e).__name__}: {e}"}
+    """One call to the model, retried while the failure is the relay's rather than the request's.
+
+    A single HTTP 502 cost an episode its score: the axis it hit returned an error, and reward.score
+    refuses to put a number on a verdict with an unusable axis -- correctly, but a relay hiccup is
+    not a missing judgement. A 4xx is the request being wrong and is not retried.
+    """
+    last: Dict[str, Any] = {"_error": "not attempted"}
+    for attempt in range(max(1, RETRIES)):
+        req = urllib.request.Request(BASE_URL.rstrip("/") + "/chat/completions",
+                                     data=json.dumps(body).encode(),
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": "Bearer " + API_KEY})
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            last = {"_error": f"HTTP {e.code}: {e.read()[:300].decode(errors='replace')}"}
+            if e.code < 500 and e.code != 429:
+                return last                       # the request is wrong; asking again will not fix
+        except Exception as e:                            # noqa: BLE001
+            last = {"_error": f"{type(e).__name__}: {e}"}
+        if attempt + 1 < max(1, RETRIES):
+            time.sleep(2 * (attempt + 1))
+            print(f"    [retry {attempt + 1}/{RETRIES - 1}] {last['_error'][:80]}")
+    return last
 
 
 def own_footprint() -> str:

@@ -349,6 +349,44 @@ def test_the_cli_loads_a_bundle_the_way_the_recorder_does() -> None:
     assert "record._osquery_snapshots(bundle)" in src
 
 
+def test_a_relay_hiccup_is_retried_and_a_bad_request_is_not() -> None:
+    """One HTTP 502 cost a whole episode its score: the axis it hit returned an error, and an
+    episode with an unusable axis is not scored -- correctly, but a relay hiccup is not a missing
+    judgement. A 4xx means the request is wrong, and asking again will not fix it."""
+    import urllib.error
+
+    calls = {"n": 0}
+
+    def flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib.error.HTTPError(req.full_url, 502, "Bad Gateway", {}, None)
+        class R:
+            def read(self): return b'{"ok": true}'
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        return R()
+
+    judge_agent.urllib.request.urlopen, real = flaky, judge_agent.urllib.request.urlopen
+    judge_agent.time.sleep, slept = (lambda s: None), judge_agent.time.sleep
+    try:
+        assert judge_agent._post({"model": "m"}) == {"ok": True}
+        assert calls["n"] == 3
+
+        calls["n"] = 0
+
+        def refused(req, timeout=None):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, None)
+
+        judge_agent.urllib.request.urlopen = refused
+        got = judge_agent._post({"model": "m"})
+        assert "HTTP 400" in got["_error"] and calls["n"] == 1
+    finally:
+        judge_agent.urllib.request.urlopen = real
+        judge_agent.time.sleep = slept
+
+
 def test_cross_check_calls_a_collection_failure_what_it_is(tmp_path: Path) -> None:
     """A recording that contradicts its own audit is not a result about ICE.
 
