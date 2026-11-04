@@ -64,6 +64,80 @@ def vsh(script: str, label: str = "", check: bool = False,
     return vm.run_script(script, label=label, check=check, timeout=timeout)
 
 
+# Two deliberate interferences, for testing the scoring rather than the agent. Both are off unless
+# set, both are recorded in the bundle, and neither is visible to the judge -- it sees the commands
+# that really ran, which is the truth either way.
+#
+#   ICE_STOP_AFTER_EXEC=1   stop the daemon the moment the audit shows this many executed commands,
+#                           so the remediation is cut in half and the threat is only partly cleared.
+#   ICE_PROBE_EXEC=cmd;cmd  after the agent is done, run these through the same host_exec path the
+#                           agent uses, so they are gated, executed and written to the audit exactly
+#                           as the agent's own are. Damage nobody has to attribute.
+#
+# Every episode so far has come back with seven answers of `none`, which cannot show whether the
+# axes discriminate: a judge that always says `none` would look the same. These are how the damage
+# scale and the partly-cleared rungs get exercised at all.
+STOP_AFTER_EXEC = int(os.environ.get("ICE_STOP_AFTER_EXEC", "0"))
+PROBE_EXEC = [c.strip() for c in os.environ.get("ICE_PROBE_EXEC", "").split(";") if c.strip()]
+
+
+def executed_in_vm() -> int:
+    """How many commands the daemon inside the VM has executed, read from its own audit."""
+    out = vsh(f"grep -c '\"event\": \"host_exec.executed\"' {STATE}/audit.jsonl 2>/dev/null "
+              f"|| echo 0", timeout=30)
+    try:
+        return int((out.stdout or "0").strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def stop_when_half_done(n: int, limit: float) -> int:
+    """Wait until the agent has run n commands, then stop the daemon where it stands.
+
+    This is the cheapest way to produce an episode that is genuinely half-remediated: no injection,
+    no forging, and the audit is exactly true -- the agent really did run only those commands. What
+    is being tested is whether the clearing axes notice what is still there.
+    """
+    deadline = time.time() + limit
+    while time.time() < deadline:
+        got = executed_in_vm()
+        if got >= n:
+            print(f"  [probe] {got} command(s) executed — stopping the daemon mid-remediation")
+            stop_daemon()
+            return got
+        time.sleep(2)
+    print(f"  [probe] gave up waiting for {n} command(s) after {limit:.0f}s "
+          f"(only {executed_in_vm()} ran)")
+    return executed_in_vm()
+
+
+def probe_exec(commands: List[str]) -> List[Dict[str, Any]]:
+    """Run commands through the daemon's own host_exec, inside the VM, with the daemon stopped.
+
+    The audit's hash chain is read from the file when the writer is constructed, so a one-shot
+    process appends to it validly. Going through host_exec rather than ssh is the point: the gate
+    reviews it, the executor runs it, and `host_exec.executed` records it the same way it records
+    the agent's own actions. To the judge it is an executed command, which is what it is.
+    """
+    out: List[Dict[str, Any]] = []
+    for command in commands:
+        script = (
+            "set -a; [ -f /root/.ice-env ] && . /root/.ice-env; "
+            "cd /root/ICE && . ice/serving/env.vm.sh >/dev/null 2>&1; set +a; "
+            "python3 - <<'EOF'\n"
+            "import json\n"
+            "from ice.daemon.mcp_server import IceTools\n"
+            "from ice.daemon.runtime import get_runtime\n"
+            f"res = IceTools(get_runtime()).host_exec({command!r}, 'probe: scoring test')\n"
+            "print(json.dumps(res.to_dict(), default=str))\n"
+            "EOF\n")
+        p_ = vsh(script, label=f"probe-exec {command}", timeout=120)
+        out.append({"command": command, "returncode": p_.returncode,
+                    "stdout": (p_.stdout or "")[-400:], "stderr": (p_.stderr or "")[-200:]})
+        print(f"  [probe] {command} -> rc={p_.returncode} {(p_.stdout or '').strip()[-160:]}")
+    return out
+
+
 def _mcp_port() -> int:
     return int(os.environ.get("ICE_MCP_PORT", "8083"))
 
@@ -708,7 +782,8 @@ def collect_host_side(ep_dir: Path, live: str) -> None:
 
 
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
-           images: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+           images: Optional[Dict[str, str]] = None,
+           probe: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # collect() has already copied the audit, the cases and the osquery snapshots out of the VM.
     ep_dir.mkdir(parents=True, exist_ok=True)
     # Already fetched by collect(), while the machine was still up.
@@ -748,6 +823,9 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
                     ("ICE_RECORD_MODE", "ICE_FORCE_ESCALATE", "ICE_AUTO_APPROVE", "ICE_DRY_RUN",
                      "ICE_DENY_CRITICAL_ASSETS")},
         "grade": det,
+        # Any deliberate interference with this episode, so a bundle is never mistaken for one the
+        # agent produced on its own. Empty for an ordinary recording.
+        "probe": probe or {},
         "audit_counts": audit_counts(ep_dir / "ice-audit.jsonl"),
         "kev_score": kev,
         # One reward, derived from two snapshots of this episode's own machine. The scenario-based
@@ -824,13 +902,24 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         case = wait_for_case(scenario.markers, armed, live)
         if flag:
             vsh(f"rm -f {json.dumps(flag)}")
+        probe: Dict[str, Any] = {}
         if case:
             print(f"  case {case.get('case_id')} "
                   f"assessment={case.get('_ice', {}).get('assessment')} attck={case.get('attck')}")
-            print(f"  settling {SETTLE_SECONDS:.0f}s for remediation + backward")
-            time.sleep(SETTLE_SECONDS)
+            if STOP_AFTER_EXEC:
+                probe["stop_after_exec"] = STOP_AFTER_EXEC
+                probe["executed_before_stop"] = stop_when_half_done(STOP_AFTER_EXEC,
+                                                                    SETTLE_SECONDS)
+            else:
+                print(f"  settling {SETTLE_SECONDS:.0f}s for remediation + backward")
+                time.sleep(SETTLE_SECONDS)
         else:
             print("  NO case within timeout")
+        if PROBE_EXEC:
+            # After the agent is done and its daemon is stopped, so the one-shot writer owns the
+            # audit while it appends.
+            stop_daemon()
+            probe["exec"] = probe_exec(PROBE_EXEC)
 
         ep_dir = DATASET / ep
         collect(ep_dir, case)
@@ -838,7 +927,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         stop_daemon()
         vm.shutdown(live)
         vm.snapshot(images["final"], of=live)
-        meta = export(ep_dir, scenario, case, armed, images)
+        meta = export(ep_dir, scenario, case, armed, images, probe=probe)
         if dirty:
             meta["golden_image_residue"] = dirty
             (ep_dir / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
