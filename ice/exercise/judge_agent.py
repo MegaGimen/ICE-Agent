@@ -554,6 +554,29 @@ def judge(t0: str, t1: str, t2: str, commands: List[Dict[str, Any]],
         out["model"] = run.get("model") or out.get("model")
         if verbose:
             print(f"  [judge] {name} -> {run.get('severity') or run.get('error')}")
+    # One more pass over the axes that failed. An episode is not scored if any axis is unusable,
+    # which is right, but a relay that is down for a minute is not a missing judgement -- six of
+    # seven axes were lost to one outage, and another episode lost a single axis to a single 502.
+    # By the time the other axes have run, minutes have passed and the relay is usually back.
+    retry = [n for n, v in out["axes"].items() if v.get("error")]
+    if retry and len(retry) < len(wanted):
+        print(f"  [judge] retrying {len(retry)} failed axis/axes: {retry}")
+    for name in retry:
+        run = judge_axis(name, t0, t1, t2, commands, refused, diffs=diffs, runtime=runtime,
+                         max_steps=max_steps, verbose=verbose)
+        for k in usage:
+            usage[k] += (run.get("usage") or {}).get(k, 0)
+        steps += run.get("steps") or 0
+        if not run.get("error"):
+            out["runs"][name] = run
+            out["axes"][name] = {k: run.get(k) for k in
+                                 ("severity", "evidence", "notes", "steps", "error", "side")}
+            out["axes"][name]["retried"] = True
+            if verbose:
+                print(f"  [judge] {name} on retry -> {run.get('severity')}")
+        elif verbose:
+            print(f"  [judge] {name} failed again: {run.get('error')}")
+
     out["usage"] = usage
     out["steps"] = steps
     out["product_state_reads"] = {n: r["product_state_reads"] for n, r in out["runs"].items()

@@ -387,6 +387,34 @@ def test_a_relay_hiccup_is_retried_and_a_bad_request_is_not() -> None:
         judge_agent.time.sleep = slept
 
 
+def test_a_failed_axis_is_tried_again_after_the_others() -> None:
+    """A relay outage cost one episode six axes and another a single one, and either loses the whole
+    episode's score. By the time the other axes have run, minutes have passed."""
+    calls = {"n": 0}
+
+    def fake_post(body):
+        calls["n"] += 1
+        name = body["messages"][0]["content"].split('"axis": "')[1].split('"')[0]
+        # data fails on its first run and succeeds when it comes back round.
+        if name == "data" and calls["n"] < 8:
+            return {"_error": "HTTP 502: "}
+        return {"model": "stub", "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+                "choices": [{"message": {"content": json.dumps(
+                    {"axis": name, "severity": "none", "evidence": "Listdir showed nothing"})}}]}
+
+    judge_agent._post, real = fake_post, judge_agent._post
+    judge_agent.image.named_diffs, rd = (lambda *a, **k: DIFFS), judge_agent.image.named_diffs
+    try:
+        verdict = judge_agent.judge("T0", "T1", "T2", [])
+    finally:
+        judge_agent._post = real
+        judge_agent.image.named_diffs = rd
+
+    assert verdict["axes"]["data"]["severity"] == "none"
+    assert verdict["axes"]["data"]["retried"] is True
+    assert reward.score(verdict)["value"] == 1.0          # the episode is scored after all
+
+
 def test_cross_check_calls_a_collection_failure_what_it_is(tmp_path: Path) -> None:
     """A recording that contradicts its own audit is not a result about ICE.
 
