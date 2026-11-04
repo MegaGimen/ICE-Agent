@@ -570,40 +570,29 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     The attack's footprint is derived from the armed image, never declared, so nothing the attack
     did is charged to the agent and nothing has to be said in advance about what the machine holds.
     """
-    from ice.exercise import image, judge_agent, snapshot_reward as sr
+    from ice.exercise import image, judge_agent, reward as rw
     base, armed, final = images["baseline"], images["armed"], images["final"]
 
-    files = sr.file_score(base, armed, final)
+    # The diffs stay: they are what the judge's tools read. What is gone is using their counts to
+    # define the score. Over one scenario that needed five corrections, four of them hand-kept
+    # lists, and the fifth could not be corrected at all -- an artifact the attack's cron writes
+    # after the armed snapshot gives path-and-hash comparison nothing to attribute it by.
     changes = image.changes(base, final)
     (ep_dir / "image-changes.json").write_text(json.dumps(
-        {"images": images, "files": files, "baseline_to_final": changes,
+        {"images": images, "baseline_to_final": changes,
          "armed_to_final": image.changes(armed, final)}, ensure_ascii=False, indent=1))
     write_evidence(ep_dir, images, changes)
 
-    runtime: Optional[Dict[str, Any]] = None
-    snaps = _osquery_snapshots(ep_dir, case) if case else {}
-    if len(snaps) == 3:
-        runtime = sr.runtime_score(snaps["t0"], snaps["t1"], snaps["t2"])
-        (ep_dir / "runtime-score.json").write_text(json.dumps(runtime, ensure_ascii=False, indent=1))
+    runtime = {}
+    if case:
+        runtime = _osquery_snapshots(ep_dir, case)
+        if runtime:
+            (ep_dir / "runtime-snapshots.json").write_text(json.dumps(
+                {k: bool(v) for k, v in runtime.items()}, indent=1))
+    print(f"  evidence: {len(changes)} changed paths | runtime snapshots: "
+          f"{sorted(k for k, v in runtime.items() if v) or 'none'}")
 
-    fc = files["counts"]
-    print(f"  files:   footprint {fc['footprint']} cleared {fc['cleared']} "
-          f"not_cleared {fc['not_cleared']} collateral {fc['collateral']} "
-          f"side_effects {fc['side_effects']}  ({len(changes)} changed paths in all)")
-    print(f"  runtime: {runtime['counts'] if runtime else 'no osquery snapshots'}")
-    if files["not_cleared"]:
-        print(f"  !! not cleared: {list(files['not_cleared'])[:6]}")
-    if files["collateral"]:
-        print(f"  !! collateral: {list(files['collateral'])[:6]}")
-
-    # The judge answers both questions, with the armed image available so it can tell the attack's
-    # own doing from the agent's. The set arithmetic is kept beside it, not over it: comparing path
-    # and hash cannot read a file, which is why it charged a correct remediation with four broken
-    # files over /etc/passwd- while the judge, having read the contents, called it userdel's normal
-    # behaviour and was right.
-    verdict = judge_agent.judge(base, final, commands, refused, armed=armed)
-    # The verdict and the conversation that produced it are stored apart: one is the result, the
-    # other is the training pair -- the messages the judge saw and the tool results it was given.
+    verdict = judge_agent.judge(base, final, commands, refused, armed=armed, runtime=runtime)
     transcript = verdict.pop("transcript", None)
     (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
     if transcript is not None:
@@ -611,30 +600,28 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
             {"model": verdict.get("model"), "steps": verdict.get("steps"),
              "usage": verdict.get("usage"), "messages": transcript},
             ensure_ascii=False, indent=1))
+
+    out = rw.score(verdict)
     if verdict.get("error"):
-        print(f"  !! damage judge failed: {verdict['error']}")
+        print(f"  !! the judge did not answer: {verdict['error']}")
     else:
-        dmg = verdict.get("damage") or []
-        res = verdict.get("residue") or []
-        print(f"  judge: threat_gone={verdict.get('threat_gone')} residue={len(res)} "
-              f"damage={len(dmg)} | {verdict.get('steps')} steps, "
+        for a in (verdict.get("artifacts") or []):
+            if str(a.get("state", "")).lower() not in rw.CLEARED_STATES:
+                print(f"    still present: {a.get('path')} — {(a.get('what') or '')[:80]}")
+        for d in out["damaged"]:
+            print(f"    damaged: {d['path']} — {d['severity']} (weight {d['weight']}) "
+                  f"{(d.get('what') or '')[:50]}")
+        print(f"  judge: {out['artifacts_cleared']}/{out['artifacts_found']} artifacts cleared, "
+              f"{len(out['damaged'])} damaged | {verdict.get('steps')} steps, "
               f"read {len(verdict.get('paths_read') or [])}/{len(changes)} paths")
-        for label, items in (("residue", res), ("damage", dmg)):
-            for it in items[:6]:
-                print(f"    {label}: {it.get('path')} — "
-                      f"{(it.get('why') or it.get('what') or '')[:90]}")
-    out = sr.reward(files, runtime, verdict)
-    print(f"  score: threat_cleared={out['threat_cleared']} damaged={out['damaged_count']} "
-          f"value={out['value']}" + ("" if out["scored"] else
-                                     f"  [UNSCORED: {out.get('unscored_reason')}]"))
+    print(f"  score: threat_cleared={out['threat_cleared']} damage={out['damage']} "
+          f"value={out['value']}"
+          + ("" if out["scored"] else f"  [UNSCORED: {out.get('unscored_reason')}]"))
+    if out.get("inconsistent"):
+        print(f"  !! the judge's headline disagrees with its own findings: {out['inconsistent']}")
     out.update({"images": images, "changed_paths_total": len(changes),
-                "judge": {"threat_gone": verdict.get("threat_gone"),
-                          "residue": verdict.get("residue"),
-                          "damage": verdict.get("damage"),
-                          "collateral_free": verdict.get("collateral_free"),
-                          "paths_read": verdict.get("paths_read"),
-                          "steps": verdict.get("steps"), "error": verdict.get("error"),
-                          "notes": verdict.get("notes")}})
+                "artifacts": verdict.get("artifacts"),
+                "runtime_snapshots": sorted(k for k, v in runtime.items() if v)})
     return out
 
 
