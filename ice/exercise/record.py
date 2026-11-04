@@ -745,7 +745,7 @@ def write_evidence(ep_dir: Path, images: Dict[str, str],
     (ep_dir / "evidence.json").write_text(json.dumps(payload, ensure_ascii=False, indent=1))
     size = (ep_dir / "evidence.json").stat().st_size
     print(f"  evidence: {len(bodies['before'])} attack diffs + {len(bodies['after'])} outcome "
-          f"diffs, {size / 1024:.0f} KiB (the bundle can be re-judged without the disks)")
+          f"diffs, {size / 1024:.0f} KiB (what the judge was shown, readable without the disks)")
     return payload
 
 
@@ -773,7 +773,8 @@ def _cross_check_arithmetic(ep_dir: Path, images: Dict[str, str], verdict: Dict[
 
 
 def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
-           commands: List[Dict[str, Any]], refused: List[Dict[str, Any]]) -> Dict[str, Any]:
+           commands: List[Dict[str, Any]], refused: List[Dict[str, Any]],
+           arm: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Seven axes, each its own run of the judge, each answered with a severity.
 
     Files come from the whole-filesystem images: every path on the machine, so an artifact left in
@@ -814,7 +815,7 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
                   for name, msgs in transcripts.items()}},
         ensure_ascii=False, indent=1))
 
-    out = rw.score(verdict)
+    out = rw.score(verdict, benign=bool((arm or {}).get("benign")))
     for row in out["axes"]:
         a = rw.AXIS[row["axis"]]
         print(f"    {row['axis']:<12} {a['question']:<42} "
@@ -1019,7 +1020,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
     score: Dict[str, Any] = {"skipped": "no images"}
     if images:
         score = _score(ep_dir, case, images, ct.executed_commands(audit_path),
-                       ct.refused_commands(audit_path))
+                       ct.refused_commands(audit_path), arm=arm)
 
     inconsistent = cross_check(ep_dir, case, score)
     if inconsistent:
@@ -1219,12 +1220,14 @@ def upload_bundle(ep_dir: Path) -> None:
 def prune_disks() -> None:
     """Keep the newest few episodes' disks and drop the rest.
 
-    Safe only because evidence.json carries the diffs the judge is given, so an episode whose disks
-    are gone can still be re-judged. Without that this would be the osquery pruning mistake again:
+    An episode whose disks are gone can no longer be re-judged: evidence.json shows what the judge
+    was given and is enough to read a verdict against, but the tools read mounted snapshots, not
+    that file. One episode was pruned while carrying a score the rules had since corrected, and the
+    correction could not be reproduced. Without that this would be the osquery pruning mistake again:
     evidence deleted out from under bundles that pointed at it.
     """
     from ice.exercise import vm
-    keep = int(os.environ.get("ICE_KEEP_EPISODE_DISKS", "5"))
+    keep = int(os.environ.get("ICE_KEEP_EPISODE_DISKS", "20"))
     groups: Dict[str, List[str]] = {}
     for label in vm.overlays():
         if label == vm.BASE_LABEL:
@@ -1232,13 +1235,35 @@ def prune_disks() -> None:
         groups.setdefault(label.rsplit("-", 1)[0], []).append(label)
     order = sorted(groups, key=lambda g: max(vm.taken_at(l) for l in groups[g]), reverse=True)
     dropped = 0
+    held = []
     for stem in order[keep:]:
+        if not scored_already(stem):
+            held.append(stem)
+            continue
         for label in groups[stem]:
             vm.drop(label)
             dropped += 1
+    if held:
+        print(f"  [prune] kept the disks of {len(held)} unscored episode(s), which are the ones "
+              f"that may still need re-judging: {held}")
     if dropped:
         print(f"  [prune] dropped {dropped} disk(s) from {len(order) - keep} older episode(s); "
-              f"their bundles keep evidence.json and stay re-judgeable")
+              f"their evidence.json still shows what the judge was given, but re-judging them "
+              f"needs the disks and is no longer possible")
+
+
+def scored_already(stem: str) -> bool:
+    """Does this episode's bundle carry a score? An unscored one is the one still worth its disks.
+
+    The retention rule dropped an episode whose 0.14 had already been shown wrong on the same
+    evidence -- the re-judge gave 0.70 -- before the correction could be written back, and the
+    judge's tools read mounted disks rather than evidence.json, so it can never be recovered.
+    """
+    ep = DATASET / stem / "episode.json"
+    try:
+        return (json.loads(ep.read_text()).get("reward") or {}).get("value") is not None
+    except (OSError, json.JSONDecodeError):
+        return False
 
 
 def main() -> None:

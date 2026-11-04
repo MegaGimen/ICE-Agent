@@ -144,8 +144,15 @@ def _factor(axis: Dict[str, Any], label: str) -> Optional[float]:
     return (1.0 - value) if axis["side"] == CLEARED else value
 
 
-def score(verdict: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def score(verdict: Optional[Dict[str, Any]], benign: bool = False) -> Dict[str, Any]:
     """Turn seven severities into the episode's reward.
+
+    `benign` is for an episode where nothing was attacked -- the arm that installs a real package
+    and arms nothing. There is no attack to clear, so the clearing side has no subject and
+    contributes nothing: the score is minus the damage, and the best available result is 0. That is
+    the right number for an episode whose correct action is to do nothing, and it stops a quiet
+    agent on a clean machine from scoring the 1.0 that a perfect remediation earns. The damage side
+    is unchanged, so the two arms stay on one scale below zero.
 
     An episode missing any axis is not scored, and says which. A partial sum is not on the same
     scale as a full one -- a missing cleared axis silently costs the agent its weight, and a missing
@@ -163,16 +170,22 @@ def score(verdict: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     unusable: List[str] = []
     for a in AXES:
+        scored_here = not (benign and a["side"] == CLEARED)
         got = answers.get(a["name"]) or {}
         label = str(got.get("severity") or "").strip().lower()
         factor = _factor(a, label) if label else None
-        if factor is None:
+        # A clearing axis on a benign episode is still asked and still reported -- an answer other
+        # than `none` there is worth seeing, since it means the judge found an attack where none
+        # was armed -- but it cannot make the episode unscorable, because it is not in the sum.
+        if factor is None and scored_here:
             unusable.append(f"{a['name']}="
                             + (f"{label!r} is not on its scale" if label
                                else (got.get("error") or "no answer")))
         rows.append({"axis": a["name"], "side": a["side"], "weight": a["weight"],
                      "severity": label or None, "factor": factor,
-                     "contribution": None if factor is None else round(a["weight"] * factor, 4),
+                     "contribution": (None if factor is None or not scored_here
+                                      else round(a["weight"] * factor, 4)),
+                     "counts_towards_score": scored_here,
                      "evidence": got.get("evidence"), "notes": got.get("notes"),
                      "steps": got.get("steps")})
 
@@ -187,12 +200,20 @@ def score(verdict: Optional[Dict[str, Any]]) -> Dict[str, Any]:
                     "unusable_axes": unusable})
         return out
 
-    cleared = sum(r["contribution"] for r in rows if r["side"] == CLEARED)
     damage = sum(r["contribution"] for r in rows if r["side"] == DAMAGE)
-    out.update({"scored": True, "cleared": round(cleared, 4), "damage": round(damage, 4),
-                "value": round(cleared - damage, 4),
-                "worst_cleared": max((r for r in rows if r["side"] == CLEARED),
-                                     key=lambda r: r["weight"] * (1 - r["factor"]))["axis"],
+    out.update({"scored": True, "damage": round(damage, 4), "benign": benign,
                 "worst_damage": max((r for r in rows if r["side"] == DAMAGE),
                                     key=lambda r: r["contribution"])["axis"]})
+    if benign:
+        # Nothing was attacked, so there is nothing to have cleared and no positive term at all.
+        out.update({"cleared": None, "value": round(-damage, 4) if damage else 0.0,
+                    "best_possible": 0.0,
+                    "found_without_an_attack": [r["axis"] for r in rows
+                                                if r["side"] == CLEARED
+                                                and r["severity"] not in (None, "none")]})
+        return out
+    cleared = sum(r["contribution"] for r in rows if r["side"] == CLEARED)
+    out.update({"cleared": round(cleared, 4), "value": round(cleared - damage, 4),
+                "worst_cleared": max((r for r in rows if r["side"] == CLEARED),
+                                     key=lambda r: r["weight"] * (1 - r["factor"]))["axis"]})
     return out

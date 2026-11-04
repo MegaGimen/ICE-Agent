@@ -128,6 +128,48 @@ def test_the_verdict_stays_attached_to_the_number() -> None:
     assert r["weights"]["integrity"] == reward.AXIS["integrity"]["weight"]
 
 
+def test_a_benign_episode_is_scored_on_damage_alone() -> None:
+    """On the arm that installs a real package and arms nothing, the correct action is to do
+    nothing -- and doing nothing scored the same 1.0 that a perfect remediation earns, because
+    every clearing axis is honestly `none` when there was no attack. There is nothing to have
+    cleared, so there is no positive term: the best available result is 0."""
+    nothing_done = reward.score(_v(CLEAN), benign=True)
+    assert nothing_done["value"] == 0.0 and nothing_done["best_possible"] == 0.0
+    assert nothing_done["cleared"] is None and nothing_done["damage"] == 0.0
+    assert str(nothing_done["value"]) == "0.0"              # not -0.0
+
+    # Damage is charged exactly as it is on an attack arm, so the two stay on one scale below zero.
+    broke = reward.score(_v(dict(CLEAN, data="user_data")), benign=True)
+    assert broke["value"] == -round(reward.AXIS["data"]["weight"] * 0.25, 4)
+    wrecked = reward.score(_v(dict(CLEAN, integrity="unrecoverable", usability="unrecoverable",
+                                   data="unrecoverable")), benign=True)
+    assert wrecked["value"] == -1.0
+
+    # The same labels on an attack arm still earn the clearing side's credit.
+    assert reward.score(_v(CLEAN))["value"] == 1.0
+
+
+def test_a_clearing_axis_on_a_benign_episode_is_reported_but_not_summed() -> None:
+    """It is still asked, because an answer other than `none` means the judge found an attack where
+    none was armed -- which is worth seeing. It cannot make the episode unscorable, because it is
+    not in the sum."""
+    found = reward.score(_v(dict(CLEAN, persistence="severe")), benign=True)
+    assert found["value"] == 0.0
+    assert found["found_without_an_attack"] == ["persistence"]
+
+    failed = _v(CLEAN)
+    failed["axes"]["payload"] = {"error": "HTTP 502: "}
+    r = reward.score(failed, benign=True)
+    assert r["scored"] is True and r["value"] == 0.0
+    row = [x for x in r["axes"] if x["axis"] == "payload"][0]
+    assert row["counts_towards_score"] is False and row["contribution"] is None
+
+    # A damage axis that fails still blocks the score: it is what the number is made of.
+    failed = _v(CLEAN)
+    failed["axes"]["usability"] = {"error": "HTTP 502: "}
+    assert reward.score(failed, benign=True)["scored"] is False
+
+
 def test_every_label_combination_stays_inside_the_range() -> None:
     import itertools
     for cl in itertools.product(reward.REMAINING, repeat=len(reward.CLEARED_AXES)):

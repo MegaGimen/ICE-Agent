@@ -168,6 +168,35 @@ def test_the_probe_records_whether_the_command_actually_ran() -> None:
     assert "script_returncode" in src
 
 
+def test_an_unscored_episode_keeps_its_disks() -> None:
+    """The retention rule dropped an episode whose 0.14 had already been shown wrong on the same
+    evidence -- the re-judge gave 0.70 -- before the correction could be written back, and the
+    judge's tools read mounted disks rather than evidence.json. Twenty are kept now, and an episode
+    with no score is never dropped whatever its age."""
+    import inspect
+    import tempfile
+
+    from ice.exercise import record
+
+    assert inspect.signature(record.prune_disks) is not None
+    src = inspect.getsource(record.prune_disks)
+    assert "scored_already(stem)" in src
+    assert 'os.environ.get("ICE_KEEP_EPISODE_DISKS", "20")' in src
+
+    with tempfile.TemporaryDirectory() as d:
+        record.DATASET, real = Path(d), record.DATASET
+        try:
+            (Path(d) / "ep-scored").mkdir()
+            (Path(d) / "ep-scored" / "episode.json").write_text('{"reward": {"value": 0.7}}')
+            (Path(d) / "ep-unscored").mkdir()
+            (Path(d) / "ep-unscored" / "episode.json").write_text('{"reward": {"value": null}}')
+            assert record.scored_already("ep-scored") is True
+            assert record.scored_already("ep-unscored") is False
+            assert record.scored_already("ep-missing") is False
+        finally:
+            record.DATASET = real
+
+
 if __name__ == "__main__":
     test_each_arm_brings_its_own_commands_and_its_own_markers()
     test_the_benign_arm_inverts_what_correct_means()
