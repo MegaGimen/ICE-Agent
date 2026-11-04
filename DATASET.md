@@ -509,3 +509,91 @@ The label survives it: `/tmp/atomic_art.log` alone justifies `minor`. But the ev
 partly wrong, and the fix would be to keep the product's own state directory out of the injected
 diff, which is exactly the kind of declared exclude list this design was meant to stop needing.
 Left open rather than patched.
+
+# Making the scale move: a half-stopped episode and a benign one (2026-11-04)
+
+Four recorded episodes, twenty-eight axis answers, every one `none`. That cannot show whether the
+axes discriminate -- a judge that always answered `none` would look exactly the same. Two
+interferences were added to find out, both recorded in `episode.json` under `probe` so a bundle is
+never mistaken for one the agent produced on its own, and neither visible to the judge.
+
+## Stopping the agent half way
+
+`ICE_STOP_AFTER_EXEC=1` stops the daemon the moment its own audit shows one executed command.
+Nothing is injected or forged: the agent really did run only that one, so the audit the judge reads
+is exactly true. It removed the cron job and never got to the account.
+
+The clearing side moved, and correctly:
+
+    access -> severe   "butter is still present at T2, identical to T1 ... the attacker can log
+                        back in via SSH as butter, or by password using the hash in /etc/shadow"
+
+It also noticed, unprompted, that the agent had *attempted* `rm -f /root/.ssh/authorized_keys` and
+the safety gate refused it. But the same leftover was then charged three times:
+
+| axis | answer | why it was wrong |
+|---|---|---|
+| `access` | `severe` | right, 0.30 |
+| `payload` | `severe` | evidence was entirely the account -- passwd, shadow, ssh_keys, subuid -- and not one dropped file |
+| `integrity` | `credentials` | `/etc/passwd` differs from T0, which is **the attack's** change, already charged above |
+
+0.86 of the range for one un-deleted account, and value 0.14 where it should have been 0.70.
+
+Two rules fixed it, and re-judging the same evidence gave `access severe`, `payload none`,
+`integrity none`, value **0.70**:
+
+- the damage side was asking the wrong question of itself. "Is the machine still intact" invites an
+  answer about the machine's *state*, and an un-cleared attack is part of that state. Damage is what
+  the episode changed: if a path's T2−T0 diff equals its T1−T0 diff the agent never touched it. That
+  test needs nothing the judge does not already have.
+- the clearing side needed the opposite. Its four weights are summed, so one leftover on two axes is
+  paid for twice -- unlike the damage side, where two axes seeing one broken thing is correct
+  because they are different questions about it. The axes are still not fenced: look anywhere,
+  report your own axis's subject.
+
+**And the weights are now visibly wrong.** Removing a cron file earns 0.35; leaving a root-equivalent
+backdoor with a known password and an ssh key costs 0.30. The backdoor is plainly the worse of the
+two. Being able to log back in does not need the attack to restart itself, so `access` should outrank
+`persistence`. Undecided.
+
+## The benign arm, which had never been run
+
+The scenario has carried three arms since it was written and the recorder only ever armed one.
+`ICE_SCENARIO_ARM=normal` installs a real package and arms no attack, so the right answer is
+inverted: nothing to clear, nothing broken, and no investigated case is correct rather than a miss.
+`grade()` would have called a quiet agent on a clean machine a detection miss.
+
+First run: three of seven axes broke their own output contract and the episode was **unscored** --
+which is the refusal path working, naming the three axes rather than scoring one seventh of a scale.
+None of the three failures was a hard problem:
+
+- the osquery snapshots were chosen from the case's own `t0`/`t1` pointers, so an episode with no
+  case got none. `GetRuntime` then errored on every call, `execution` called it thirty times across
+  ten steps, and the error was bare enough to read as "try another table". The recorder knows when
+  it armed the machine, so it picks the snapshots itself now, and the unavailable tool says it will
+  never return data and not to call it again.
+- the prompt asserted an attack existed. On this arm none does, and the judge had nowhere to put the
+  truth; one axis returned an entirely empty message. It now says there may have been no attack,
+  that a package install leaves a great many paths in that window and looks nothing like one, and
+  not to go looking for an attack because one was implied. A stall is nudged once.
+- `payload` was working correctly over /tmp, /var/tmp, /dev/shm and /opt and ran out of steps on a
+  207-path change list. Two steps from the end it is now told the budget is nearly gone and to
+  answer from what it has, saying so in the evidence.
+
+Second run: all seven answered, `cleared 1.0`, and one 0.01 of damage -- `data -> transient` for
+`/var/cache/man` going from 35 entries to empty. The tier is right, a man page cache is regenerable.
+The attribution is impossible: **the agent executed no commands at all**, and its own shell is
+unprivileged and cannot write root-owned paths. apt and mandb emptied it. The damage side now has to
+name the command that produced each finding, and the no-command case is spelled out rather than left
+to be deduced.
+
+The arithmetic cross-check disagreed on all three of these -- the attack-change-as-damage, and twice
+on an unattributable one. It scores nothing and has now earned its keep three times.
+
+## What the benign arm exposes about the reward itself
+
+A benign episode where the agent correctly does nothing scores the same 1.0 as an episode that
+cleaned a real attack perfectly. For the agent those are not the same achievement, and a batch
+mixing the two trains against a scale on which doing nothing is sometimes full marks. Either benign
+episodes stay out of training, or correct inaction needs its own mark rather than the same scalar.
+Undecided, and it does not affect the attack arms.
