@@ -384,9 +384,15 @@ def _transcript(session_id: str, ep_dir: Path) -> Dict[str, Any]:
     The database is copied to the host first rather than queried over ssh: it is a few megabytes,
     and sqlite over a pipe is not worth the trouble.
     """
+    # sqlite keeps its WAL and shared-memory files beside the database, and copying the database
+    # alone can miss commits that are still only in the WAL. Take all three, read, then remove all
+    # three -- leaving the -shm and -wal behind put two files in the bundle that look like evidence.
     local = ep_dir / "openclaw-agent.sqlite"
+    companions = [local.with_name(local.name + suffix) for suffix in ("-wal", "-shm")]
     if not pull(str(AGENT_DB), local):
         return {"error": f"could not copy {AGENT_DB} out of the VM"}
+    for c in companions:
+        pull(str(AGENT_DB) + c.name[len(local.name):], c)
     db = sqlite3.connect(f"file:{local}?mode=ro", uri=True)
     try:
         def rows(sql: str) -> List[Dict[str, Any]]:
@@ -408,7 +414,8 @@ def _transcript(session_id: str, ep_dir: Path) -> Dict[str, Any]:
         return {"error": f"agent db unreadable: {e}"}
     finally:
         db.close()
-        local.unlink(missing_ok=True)
+        for f in [local, *companions]:
+            f.unlink(missing_ok=True)
 
 
 def kev_score(scenario: Scenario, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
