@@ -167,10 +167,20 @@ def test_content_reads_either_snapshot(tmp_path: Path) -> None:
 
 
 def _three(tmp_path: Path, t0: dict, t1: dict, t2: dict) -> None:
-    """Three snapshot trees under the names the judge is given: healthy, attacked, and the end."""
+    """Three snapshot trees under the names the judge is given: healthy, attacked, and the end.
+
+    Every file gets the same timestamp, because a real snapshot is a qcow2 overlay over the one
+    before it and a file nobody rewrote keeps its mtime. Writing three trees instead leaves them
+    whatever the clock said, and a file that is identical in T0 and T2 then differs by mtime alone
+    -- which `diff` reports as `mtime_only` rather than as unchanged. That made this flaky: it
+    passed only when both writes happened to land inside the same clock tick.
+    """
     _use(tmp_path, ("T0", "T1", "T2"))
     for label, files in (("T0", t0), ("T1", t1), ("T2", t2)):
         _tree(tmp_path / label, files)
+    for fp in sorted(tmp_path.rglob("*")):
+        if fp.is_file() and not fp.is_symlink():
+            os.utime(fp, (1_000_000, 1_000_000))
 
 
 def test_listdir_is_the_union_so_a_deletion_is_visible(tmp_path: Path) -> None:
