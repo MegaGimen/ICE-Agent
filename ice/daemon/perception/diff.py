@@ -9,7 +9,7 @@ what a path or key already contains.
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ice.daemon.contracts import ChangeEntry, Direction, Provenance
 from ice.daemon.perception.snapshot import TABLES, Snapshot, Table
@@ -48,6 +48,53 @@ def _entry(t: Table, action: str, key: str, row: Dict, meta: Dict, ts: float, se
     # Not part of the frozen contract (to_dict omits it); the detection gate uses it as structured context.
     e.facts = facts
     return e
+
+
+MAX_ROWS = int(__import__("os").environ.get("ICE_STATE_DIFF_ROWS", "80"))
+
+
+def render(prev: Optional[Snapshot], cur: Snapshot, tables: List[str]) -> Dict[str, str]:
+    """One table's state now, with the changes marked, in the shape of a unified diff.
+
+    A change entry on its own says `added: <row>` and nothing about what it was added to, and the
+    rows that did not change are by definition absent from a diff. So the consumer gets a `+` with
+    no "above" -- which is how an agent came to read a new row in `ssh_keys` as a new key in the
+    file. It was the same key: the attack had pointed a new account's home at /root, so osquery read
+    /root/.ssh/authorized_keys twice and listed it under two names. Both rows carried the same hash,
+    and seeing them side by side is all it would have taken.
+
+    So the whole table is handed over as it is now, with `+` on what appeared, `-` on what is gone
+    and a space on what was already there. The baseline is not sent separately: an unmarked line
+    *is* the baseline.
+    """
+    out: Dict[str, str] = {}
+    by_name = {t.name: t for t in TABLES}
+    for name in dict.fromkeys(tables):
+        t = by_name.get(name)
+        if t is None or t.kind != "stable":
+            continue
+        now = cur.rows(name)
+        was = prev.rows(name) if prev is not None else {}
+        lines: List[Tuple[int, str]] = []        # (sort rank, text) -- changes first when capped
+        for k in sorted(now.keys() | was.keys()):
+            summary = t.summary(now.get(k) or was.get(k) or {})
+            label = f"{k}   {summary}".rstrip()
+            if k not in was:
+                lines.append((0, f"+ {label}"))
+            elif k not in now:
+                lines.append((0, f"- {label}"))
+            elif now[k] != was[k]:
+                lines.append((0, f"- {k}   {t.summary(was[k])}".rstrip()))
+                lines.append((0, f"+ {label}"))
+            else:
+                lines.append((1, f"  {label}"))
+        kept = sorted(lines, key=lambda x: x[0])[:MAX_ROWS]
+        body = "\n".join(text for _, text in sorted(kept, key=lambda x: x[1].lstrip("+- ")))
+        omitted = len(lines) - len(kept)
+        head = (f"{name}: {len(now)} row(s) now"
+                + (f", {omitted} unchanged row(s) not shown" if omitted else ""))
+        out[name] = f"{head}\n{body}"
+    return out
 
 
 def diff(prev: Optional[Snapshot], cur: Snapshot, baseline: Baseline, learning: bool = False) -> List[ChangeEntry]:

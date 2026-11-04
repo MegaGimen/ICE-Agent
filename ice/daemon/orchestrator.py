@@ -27,6 +27,7 @@ from ice.daemon.investigate import agent, prompts
 from ice.daemon.investigate.case import build_case, extract_json
 from ice.daemon.mcp_server import IceTools
 from ice.daemon.perception import snapshot as snap_mod
+from ice.daemon.perception import diff as diff_mod
 from ice.daemon.perception.diff import diff
 from ice.daemon.perception.logs import AuthLogWatcher
 from ice.daemon.perception.store import Baseline, SnapshotStore
@@ -291,9 +292,12 @@ class Orchestrator:
         for note in self._active_lessons():
             if note not in experience:
                 experience.append(note)
+        # The tables the escalations are about, rendered as their whole contents now with the
+        # changes marked. A change entry alone is a `+` with nothing above it.
+        state_diff = diff_mod.render(t0, t1, [r.entry.table for r in escalated])
         msg = prompts.wake_message(case_id, host, [r.to_dict() for r in escalated], knowledge=knowledge or None,
                                    experience=experience or None, correlation=correlation or None,
-                                   graph_available=graph is not None)
+                                   graph_available=graph is not None, state_diff=state_diff or None)
         meta["knowledge"] = [n.split(" ", 2)[1] for n in knowledge]
         self.rt.audit.write("case.open", case=case_id, escalations=len(escalated))
         reply = agent.wake(case_id, msg)
