@@ -414,13 +414,19 @@ def main() -> None:
         cases = sorted(bundle.glob("case-*.json"))
         case = json.loads(cases[0].read_text()) if cases else {}
         runtime = record._osquery_snapshots(bundle, case)
-    verdict = judge(a.t0, a.t1, a.t2, commands, refused, runtime=runtime, axes=tuple(a.axis),
-                    hash_check=a.hash_check, verbose=not a.quiet)
-    for run in verdict["runs"].values():
-        run.pop("transcript", None)
-    print(json.dumps({"axes": verdict["axes"], "usage": verdict["usage"]}, indent=1,
-                     ensure_ascii=False))
-    print(json.dumps(rw.score(verdict), indent=1, ensure_ascii=False))
+    try:
+        verdict = judge(a.t0, a.t1, a.t2, commands, refused, runtime=runtime, axes=tuple(a.axis),
+                        hash_check=a.hash_check, verbose=not a.quiet)
+        for run in verdict["runs"].values():
+            run.pop("transcript", None)
+        print(json.dumps({"axes": verdict["axes"], "usage": verdict["usage"]}, indent=1,
+                         ensure_ascii=False))
+        print(json.dumps(rw.score(verdict), indent=1, ensure_ascii=False))
+    finally:
+        # Reading a snapshot mounts it. Three runs of this command without the unmount left nine
+        # nbd mounts on the box, which is how `du` once reported 50 GB for a 4.8 GB store. The
+        # episode recorder unmounts in its own teardown; a judge invoked by hand has to do it here.
+        image.release()
 
 
 if __name__ == "__main__":
