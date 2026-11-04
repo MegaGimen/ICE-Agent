@@ -395,7 +395,12 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
             else:
                 result = tools.dispatch(fn.get("name") or "", args)
             if verbose:
-                print(f"    [{axis} {step}] {fn.get('name')}({json.dumps(args)[:100]}) -> "
+                # The redaction note is the last key on the result and the line is cut at 140
+                # characters, so it was invisible in a log: the judge opened the case file and
+                # nothing said the filter had run. It goes in front of the truncation.
+                mark = (f" [redacted {result['redacted_fields']}]"
+                        if isinstance(result, dict) and result.get("redacted_fields") else "")
+                print(f"    [{axis} {step}] {fn.get('name')}({json.dumps(args)[:100]}){mark} -> "
                       f"{json.dumps(result)[:140]}")
             messages.append({"role": "tool", "tool_call_id": call.get("id"),
                              "content": json.dumps(result, ensure_ascii=False)[:60000]})
@@ -486,8 +491,15 @@ def main() -> None:
                         hash_check=a.hash_check, verbose=not a.quiet)
         for run in verdict["runs"].values():
             run.pop("transcript", None)
-        print(json.dumps({"axes": verdict["axes"], "usage": verdict["usage"]}, indent=1,
-                         ensure_ascii=False))
+        print(json.dumps({"axes": verdict["axes"], "usage": verdict["usage"],
+                          "product_state_reads": verdict.get("product_state_reads") or {}},
+                         indent=1, ensure_ascii=False))
+        # Printed on its own line as well, because it is the one thing in here a reader has to see
+        # and it would otherwise be a nested key in a large object.
+        for ax, reads in (verdict.get("product_state_reads") or {}).items():
+            for r in reads:
+                print(f"!! {ax} read the product's own state: {r['tool']} {r['path']} "
+                      f"(removed {r.get('redacted_fields') or 'nothing'})")
         print(json.dumps(rw.score(verdict), indent=1, ensure_ascii=False))
     finally:
         # Reading a snapshot mounts it. Three runs of this command without the unmount left nine

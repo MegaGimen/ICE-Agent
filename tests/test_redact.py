@@ -106,6 +106,19 @@ def test_the_tool_filters_and_the_read_is_written_down() -> None:
     assert len(tools.product_state_reads) == 1
 
 
+def test_the_read_is_visible_to_whoever_runs_the_judge_by_hand() -> None:
+    """The filter worked on a real episode and nothing showed it: the note is the last key on the
+    result, the verbose line is cut at 140 characters, and the command line printed only the axes.
+    A filter nobody can see having run is one nobody will notice stopping."""
+    import inspect
+
+    src = inspect.getsource(judge_agent.judge_axis)
+    assert "redacted_fields" in src and "mark" in src, "the verbose line hides the redaction"
+    src = inspect.getsource(judge_agent.main)
+    assert "product_state_reads" in src
+    assert "read the product's own state" in src
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
