@@ -102,6 +102,15 @@ def _current_label() -> str:
     return next(iter(_PORT), "vm")
 
 
+def live_label() -> str:
+    """The episode's own VM, by name. Anything addressing "the VM" by a module default addresses
+    whatever happens to be on port 2222, which has twice been a different machine."""
+    for label in _PORT:
+        if label.endswith("-live"):
+            return label
+    return _current_label()
+
+
 def close_connection(label: str = "") -> None:
     """Drop the shared connection, so a VM that is being shut down does not leave it dangling."""
     name = label or _current_label()

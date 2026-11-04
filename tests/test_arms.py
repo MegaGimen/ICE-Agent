@@ -244,6 +244,33 @@ def test_a_label_can_point_at_a_file_that_is_not_named_after_it() -> None:
             vm.OVERLAYS = real
 
 
+def test_the_repo_sync_addresses_this_episodes_vm_and_proves_it_landed() -> None:
+    """It named the module's default port while every VM gets a free one. With a leftover VM on
+    2222 the code went into that machine, rsync returned 0, the log said ok -- and the episode ran
+    the golden image's ICE instead of the code under test, which is the one thing this prevents.
+    The same fixed port made a second VM a silent impostor once before.
+    """
+    import inspect
+
+    from ice.exercise import record, vm
+
+    src = inspect.getsource(record.sync_repo)
+    assert "vm.SSH_PORT" not in src, "still addressing the module default"
+    assert "vm.ssh_port(" in src
+    # A return code is not proof: rsync to the wrong machine succeeds, and so does rsync of nothing.
+    assert "stat -c %s" in src and "went somewhere else" in src
+    assert "raise RuntimeError" in src
+
+    # live_label picks the episode's own machine rather than whatever is in the port table first.
+    vm._PORT.clear()
+    vm._PORT.update({"other-episode-live": 2222, "ep-live": 2223})
+    assert vm.ssh_port("ep-live") == 2223
+    vm._PORT.clear()
+    vm._PORT["ep-live"] = 2223
+    assert vm.live_label() == "ep-live"
+    vm._PORT.clear()
+
+
 if __name__ == "__main__":
     test_each_arm_brings_its_own_commands_and_its_own_markers()
     test_the_benign_arm_inverts_what_correct_means()

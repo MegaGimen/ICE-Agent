@@ -264,12 +264,27 @@ def sync_repo() -> None:
     recorded against whatever ICE looked like that day.
     """
     from ice.exercise import vm
+    # The episode's own port, not the module default. Every VM now gets a free one, and this still
+    # named 2222: with a leftover VM listening there the code went into the wrong machine and rsync
+    # reported success, so the episode ran the golden image's ICE rather than the code under test --
+    # which is the one thing this function exists to prevent. The same fixed port made a second VM a
+    # silent impostor once before.
+    port = vm.ssh_port(vm.live_label() if hasattr(vm, "live_label") else "")
     rsync = ["rsync", "-a", "--delete",
              "--exclude", "__pycache__", "--exclude", ".git", "--exclude", "*.pyc",
-             "-e", f"ssh -i {vm.KEY} -p {vm.SSH_PORT} " + " ".join(vm._SSH_OPTS),
+             "-e", f"ssh -i {vm.KEY} -p {port} " + " ".join(vm._SSH_OPTS),
              str(REPO) + "/", "root@127.0.0.1:/root/ICE/"]
     _p = subprocess.run(rsync, capture_output=True, text=True)
-    print(f"  [sync-repo] {'ok' if _p.returncode == 0 else _p.stderr.strip()[:120]}")
+    if _p.returncode != 0:
+        raise RuntimeError(f"sync_repo failed on port {port}: {_p.stderr.strip()[:200]}")
+    # Proof, not a return code: read back a file the host just changed. rsync to the wrong machine
+    # succeeds, and so does rsync of nothing.
+    want = (REPO / "ice" / "daemon" / "investigate" / "prompts.py").stat().st_size
+    got = vsh("stat -c %s /root/ICE/ice/daemon/investigate/prompts.py", timeout=30).stdout.strip()
+    if got != str(want):
+        raise RuntimeError(f"sync_repo went somewhere else: prompts.py is {got} bytes in the VM, "
+                           f"{want} on the host (port {port})")
+    print(f"  [sync-repo] ok on port {port}, verified {want} bytes")
 
 
 def refuse_host_daemon() -> None:
