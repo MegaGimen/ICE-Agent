@@ -121,10 +121,13 @@ def probe_exec(commands: List[str]) -> List[Dict[str, Any]]:
     """
     out: List[Dict[str, Any]] = []
     for command in commands:
+        # The daemon's own interpreter, not the system one: host_exec comes in through
+        # ice.daemon.mcp_server, which imports the MCP server package, and that lives in the
+        # daemon's virtualenv. With plain python3 every probe died on ModuleNotFoundError.
         script = (
             "set -a; [ -f /root/.ice-env ] && . /root/.ice-env; "
             "cd /root/ICE && . ice/serving/env.vm.sh >/dev/null 2>&1; set +a; "
-            "python3 - <<'EOF'\n"
+            "\"${ICE_DAEMON_PY:-python3}\" - <<'EOF'\n"
             "import json\n"
             "from ice.daemon.mcp_server import IceTools\n"
             "from ice.daemon.runtime import get_runtime\n"

@@ -103,6 +103,21 @@ def test_collection_does_not_need_the_vm_to_be_reachable() -> None:
     assert run.index('vm.snapshot(images["final"]') < run.index("collect_from_snapshot(")
 
 
+def test_the_probe_runs_under_the_daemons_interpreter() -> None:
+    """The probe goes in through ice.daemon.mcp_server so the gate, the executor and the audit are
+    the agent's own path -- and that module imports the MCP server package, which is in the daemon's
+    virtualenv and not in the system python. Every probe died on ModuleNotFoundError."""
+    import inspect
+
+    from ice.exercise import record
+
+    src = inspect.getsource(record.probe_exec)
+    assert "ICE_DAEMON_PY" in src
+    assert "python3 - <<" not in src
+    # And it still goes through host_exec rather than ssh, which is what makes it the agent's.
+    assert "IceTools" in src and "host_exec" in src
+
+
 if __name__ == "__main__":
     test_each_arm_brings_its_own_commands_and_its_own_markers()
     test_the_benign_arm_inverts_what_correct_means()
