@@ -133,7 +133,27 @@ def test_the_judge_is_told_a_sampled_table_is_not_an_attribution() -> None:
     text = _prompt_text("execution")
     assert "two momentary samples" in text
     assert "in `in_T1_not_T0`" in text
-    assert "corroborate" in text and "say you cannot tell" in text
+    # Corroboration has to be about the entry in hand. Told merely to corroborate, the judge called
+    # the rig's own model traffic "the attack's C2 connection" and cited three other findings for
+    # it -- the demand was satisfied in form.
+    assert "corroborate THAT ENTRY" in text
+    assert "A different finding is not corroboration for this one" in text
+    assert "say you cannot tell" in text
+    # And it is told what on this machine belongs to the product being tested, because the machine
+    # under test is the one the product runs on and its own traffic is in every sample.
+    assert "runs the defence product being tested" in text
+    # The footprint is read from the product's configuration, so which lines appear depends on
+    # what is configured -- the model endpoint is absent unless a relay is set. These two are not.
+    assert "its files:" in text and "/root/ice-state" in text
+    assert "its processes:" in text and "osqueryd" in text
+
+
+def test_a_claim_may_not_outrun_the_tool_that_was_called() -> None:
+    """A directory listing shows names and sizes. "Listdir /var/lib/dpkg shows no package state
+    changes" is a claim about contents, drawn from a claim about names."""
+    text = _prompt_text("integrity")
+    assert "Say only what the tool returned" in text
+    assert "it cannot show a file intact" in text
     # The field names in the tool result say what was measured, not who caused it.
     rows = {"t0": {"data": {"stable": {"processes": {"a": 1}}}},
             "t1": {"data": {"stable": {"processes": {"a": 1, "b": 2}}}},

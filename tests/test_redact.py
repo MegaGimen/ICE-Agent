@@ -61,12 +61,43 @@ def test_nothing_outside_the_products_own_state_is_touched() -> None:
     assert not redact.is_product_state("/root/ice-state-backup/audit.jsonl")
 
 
-def test_what_cannot_be_filtered_is_withheld_rather_than_passed() -> None:
-    """Inside the product's state, a file that is neither JSON nor JSONL cannot be filtered field by
-    field. Withholding one unparsable file costs less than leaving the channel open."""
-    body, removed = redact.text("/root/ice-state/graph/kuzu.wal", "\x00binary junk\x00")
-    assert "binary junk" not in body and removed == ["<whole file>"]
-    assert "cannot be removed field by field" in body
+def test_the_added_lines_of_a_diff_are_filtered_too() -> None:
+    """A unified diff marks every line, and json.loads ignores leading whitespace -- so a context
+    line ` {...}` parsed and was filtered while an added line `+{...}` did not parse and went
+    through untouched. The agent's own words are in the added lines by definition, so the filter was
+    missing exactly what it was built for."""
+    diff = "\n".join([
+        "--- a/root/ice-state/audit.jsonl",
+        "+++ b/root/ice-state/audit.jsonl",
+        "@@ -1 +1,3 @@",
+        ' {"event": "gate", "hash": "ab12"}',
+        '+{"event": "tool", "explanation": "I checked it, the box is clean", "hash": "cd"}',
+        '-{"event": "old", "intent": "a value with an escaped \\" quote in it"}',
+    ])
+    body, removed = redact.text("/root/ice-state/audit.jsonl", diff)
+    assert "the box is clean" not in body
+    assert "escaped" not in body
+    assert sorted(set(removed)) == ["explanation", "intent"]
+    # The diff is still a diff: the marks, the headers and the unaffected fields survive.
+    assert body.splitlines()[0].startswith("--- ") and "@@ -1 +1,3 @@" in body
+    assert '+{"event": "tool"' in body and '-{"event": "old"' in body
+    assert '"hash": "cd"' in body
+
+
+def test_nothing_is_withheld_whole_because_a_parser_refused_it() -> None:
+    """Withholding was the first answer and it was wrong. On a real episode it swallowed a flag file
+    with no prose in it at all, and the osquery snapshots -- facts the judge needs, which failed to
+    parse only because they are bigger than the read cap. The fallback is a textual sweep, so a
+    truncated document keeps everything except the authored values."""
+    trunc = '{"case_id": "c", "reason": "the machine is clean", "rows": [1, 2, 3'
+    body, removed = redact.text("/root/ice-state/snapshots/x.json", trunc)
+    assert "the machine is clean" not in body
+    assert removed == ["reason (text)"]
+    assert '"case_id": "c"' in body and "[1, 2, 3" in body        # the rest is intact
+
+    # A file with no authored field in it comes back byte for byte, whatever it is.
+    for body_in in ("1793769688.21", "", "\x00binary junk\x00"):
+        assert redact.text("/root/ice-state/FORCE_ESCALATE", body_in) == (body_in, [])
 
 
 def test_a_deletion_is_still_visible_which_is_why_paths_are_not_blocked() -> None:

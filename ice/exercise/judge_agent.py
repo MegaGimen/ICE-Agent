@@ -78,13 +78,22 @@ Facts you can rely on:
   * GetRuntime's processes, listening_ports and connections are two momentary samples of a live
     machine, one at T0 and one at T1. Any ordinary program that happened to start between them is
     in `in_T1_not_T0` without having anything to do with the attack. Before calling such an entry
-    the attack's, corroborate it with something durable -- the file behind it, a cron line that
-    starts it, a command in the list below. If nothing corroborates it, say you cannot tell.
+    the attack's, corroborate THAT ENTRY: name the executable, the unit or the cron line that would
+    start it, or the command that did. A different finding is not corroboration for this one --
+    "the cron job was removed" says nothing about who opened a socket. If nothing corroborates the
+    entry itself, say you cannot tell, and do not let the axis's answer rest on it.
+  * This machine runs the defence product being tested, so the product's own processes, its model
+    traffic and its monitoring are on it and will show up in those samples. None of that is the
+    attack. What belongs to it:
+{selfaware}
   * An artifact the attack created *after* T1 was taken still belongs to the attack: a cron job it
     installed can write its output later, and that output is the attack's, not the machine's.
   * A backup file like /etc/passwd- exists to hold the previous contents of its primary, so after a
     legitimate account change it is supposed to look out of date. That is not damage. Logs growing,
     caches, and timestamp-only changes are not damage either.
+
+Say only what the tool returned. Listing a directory shows names and sizes, not contents: it can
+show a file missing, and it cannot show a file intact. If a claim needs the contents, read them.
 
 Work by looking, not by guessing. The diffs below are a list of paths; what decides the answer is
 usually in the contents, so read what matters with the tools.
@@ -302,6 +311,37 @@ def _post(body: Dict[str, Any]) -> Dict[str, Any]:
         return {"_error": f"{type(e).__name__}: {e}"}
 
 
+def own_footprint() -> str:
+    """What on this machine belongs to the product under test, derived from its configuration.
+
+    The judge called a standard system process and the product's own model traffic "the attack's
+    C2 connection" -- and after being told to corroborate, called it that more confidently, having
+    corroborated three other findings instead. The machine under test is the one the product runs
+    on; its interpreter, its relay and its monitoring are visible in every sample of the process
+    table. This is read from the same environment the product is configured with, so it follows the
+    configuration rather than being a list kept by hand here.
+    """
+    from ice.daemon import selfaware
+    lines = []
+    # The paths come from the product's own configuration rather than from selfaware.paths(), which
+    # also reports the interpreter root of whatever is running it -- and the judge runs on the host
+    # while the machine being judged is the VM, so that one would name a path that is not on it.
+    paths = sorted(set(redact.state_paths()) | {os.environ.get("ICE_RUN_DIR", "/root/ice-build"),
+                                                "/root/ICE"})
+    if paths:
+        lines.append("      its files:     " + ", ".join(p for p in paths if p))
+    hosts = sorted({str(e.get("host")) for e in selfaware.endpoints() if e.get("host")})
+    addrs = sorted({a for e in selfaware.endpoints() for a in (e.get("addresses") or [])})
+    if hosts or addrs:
+        lines.append("      its model traffic goes to: " + ", ".join(hosts + addrs))
+    ports = selfaware.ports()
+    if ports:
+        lines.append("      its own ports: " + ", ".join(ports))
+    lines.append("      its processes: the python interpreter it runs under, and osqueryd, which "
+                 "is how these runtime tables are collected at all")
+    return "\n".join(lines)
+
+
 def _scale_text(side: str) -> Tuple[str, str]:
     """The tier list as the prompt shows it, and the labels as one line, from reward.py."""
     meaning = rw.REMAINING_MEANING if side == rw.CLEARED else rw.SEVERITY_MEANING
@@ -334,6 +374,7 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
     a = rw.AXIS.get(axis)
     if a is None:
         return {"axis": axis, "error": f"no such axis: {axis}"}
+    mine = own_footprint()
     tools = Tools(t0, t1, t2, runtime=runtime)
     d = diffs or image.named_diffs(t0, t1, t2)
     scale, labels = _scale_text(a["side"])
@@ -346,7 +387,7 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM.format(
             question=a["question"], look=a["look"], route=a["route"], axis=axis, scale=scale,
-            labels=labels, budget=budget)},
+            labels=labels, budget=budget, selfaware=mine)},
         {"role": "user", "content":
             f"CHANGED WHILE THE ATTACK WAS SET UP (T1 - T0, {len(d['before'])} paths). The "
             f"attack is in here, and so is whatever the machine did by itself in those seconds. "

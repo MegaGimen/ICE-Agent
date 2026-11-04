@@ -14,6 +14,10 @@ The file is still read, its size and hash are still right, a deletion or a trunc
 only the agent-authored values are replaced, and the result says which and how many, so a reader can
 see the filter worked rather than having to trust it.
 
+Nothing is withheld whole. That was the first answer for text no parser would take, and on a real
+episode it swallowed a flag file containing no prose at all and the osquery snapshots, which are
+facts the judge needs and which failed to parse only because they are larger than the read cap.
+
 What counts as the product's own state is derived from the same environment the recorder uses, not
 from a list of paths kept here.
 """
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -68,13 +73,47 @@ def _strip(obj: Any, removed: List[str], prefix: str = "") -> Any:
     return obj
 
 
+# A JSON string value, escapes and all, for the keys above. This is the fallback for text that no
+# parser will take: a document truncated at the read cap is not valid JSON, and a diff's own header
+# lines are not JSON at all. Withholding such a file whole was the first answer and it was wrong --
+# it hid a flag file with no prose in it and the osquery snapshots, which are facts the judge needs
+# and which only failed to parse because they are larger than the read cap.
+_VALUE = re.compile(r'"(' + "|".join(sorted(AUTHORED)) + r')"(\s*:\s*)"(?:[^"\\]|\\.)*"')
+
+
+def _sweep(body: str, removed: List[str]) -> str:
+    """Replace the authored keys' values wherever they appear in text, parser or no parser."""
+    def sub(m: "re.Match[str]") -> str:
+        removed.append(m.group(1) + " (text)")
+        return f'"{m.group(1)}"{m.group(2)}"{PLACEHOLDER}"'
+    return _VALUE.sub(sub, body)
+
+
+_MARKS = (" ", "+", "-")
+
+
+def _split_mark(line: str) -> Tuple[str, str]:
+    """A unified diff prefixes every line. Take the mark off so the rest can be parsed.
+
+    This is the whole reason the filter missed what it was built for. json.loads ignores leading
+    whitespace, so a context line ` {...}` parsed and was filtered, while an added line `+{...}`
+    did not parse and went through untouched -- and the agent's own words are in the added lines by
+    definition. The header lines (---, +++, @@) still fail to parse and fall to the sweep.
+    """
+    if line[:1] in _MARKS and line[1:2] in ("{", "["):
+        return line[0], line[1:]
+    return "", line
+
+
 def text(path: str, body: str) -> Tuple[str, List[str]]:
     """The body with the agent's prose taken out, and the field paths that were taken.
 
-    Handles a JSON document and a JSONL log, because those are the two shapes this material comes
-    in. Anything under the product's state that parses as neither cannot be filtered field by field,
-    so it is withheld whole rather than passed through -- withholding one unparsable file is a
-    smaller cost than leaking the channel this exists to close.
+    Three passes, strongest first, and nothing is ever withheld whole:
+
+      1. the body as one JSON document -- structural, so a key is only matched as a key;
+      2. line by line, with any unified-diff mark taken off first, for a JSONL log or its diff;
+      3. a textual sweep over whatever neither pass could parse, for a document cut off at the read
+         cap or a diff's own header lines.
     """
     if not is_product_state(path):
         return body, []
@@ -86,25 +125,16 @@ def text(path: str, body: str) -> Tuple[str, List[str]]:
     else:
         return json.dumps(_strip(obj, removed), ensure_ascii=False, indent=1), removed
 
-    lines = body.splitlines()
     out: List[str] = []
-    parsed = 0
-    for line in lines:
-        if not line.strip():
-            out.append(line)
-            continue
+    for line in body.splitlines():
+        mark, rest = _split_mark(line)
         try:
-            obj = json.loads(line)
+            obj = json.loads(rest)
         except json.JSONDecodeError:
-            out.append(line)
-            continue
-        parsed += 1
-        out.append(json.dumps(_strip(obj, removed), ensure_ascii=False))
-    if parsed:
-        return "\n".join(out), removed
-    return (f"{PLACEHOLDER}\n(this file is inside the product's own state and is neither JSON nor "
-            f"JSONL, so agent-authored text cannot be removed field by field. Its size, hash and "
-            f"existence are reported above and are unaffected.)"), ["<whole file>"]
+            out.append(_sweep(line, removed))
+        else:
+            out.append(mark + json.dumps(_strip(obj, removed), ensure_ascii=False))
+    return "\n".join(out), removed
 
 
 def record(result: Dict[str, Any], path: str) -> Dict[str, Any]:
