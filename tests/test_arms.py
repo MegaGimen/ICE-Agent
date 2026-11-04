@@ -114,6 +114,10 @@ def test_the_probe_runs_under_the_daemons_interpreter() -> None:
     src = inspect.getsource(record.probe_exec)
     assert "ICE_DAEMON_PY" in src
     assert "python3 - <<" not in src
+    # And the daemon's own environment, or the one-shot process has no ICE_RECORD_MODE and the gate
+    # keeps its score provider: both probes were vetoed with "Action lacks a legitimate basis",
+    # which is a veto the agent's own calls do not face.
+    assert "/root/ice-posture.env" in src
     # And it still goes through host_exec rather than ssh, which is what makes it the agent's.
     assert "IceTools" in src and "host_exec" in src
 
