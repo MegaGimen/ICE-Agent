@@ -26,6 +26,7 @@ is what stops an episode from deleting the recording rig's own SSH key or models
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import sqlite3
@@ -70,8 +71,9 @@ def _mcp_port() -> int:
 # Variables that configure the recorder itself and mean nothing to the daemon inside the VM. The
 # judge's credentials are the important ones: they stay on the host, which is the point of running
 # the episode in a VM at all.
-_HOST_ONLY = ("ICE_VM_", "ICE_IMAGE_", "ICE_JUDGE_", "ICE_DATASET_DIR", "ICE_RIG_DIR",
-              "ICE_RECORD_TIMEOUT", "ICE_RECORD_SETTLE", "ICE_RECORD_WARMUP", "ICE_KEEP_LIVE")
+_HOST_ONLY = ("ICE_VM_", "ICE_IMAGE_", "ICE_JUDGE_", "ICE_INTAKE_", "ICE_DATASET_DIR",
+              "ICE_RIG_DIR", "ICE_RECORD_TIMEOUT", "ICE_RECORD_SETTLE", "ICE_RECORD_WARMUP",
+              "ICE_KEEP_LIVE", "ICE_EVIDENCE_")
 
 
 def push_posture() -> List[str]:
@@ -818,6 +820,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
             (ep_dir / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
         print(f">>> {ep}: grade={'MISS' if meta['grade'].get('miss') else 'OK'} "
               f"counts={meta['counts']}")
+        upload_bundle(ep_dir)
         return meta
     except TargetLost as e:
         ep_dir = DATASET / ep
@@ -831,6 +834,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
                                    "to detect the attack, so this is not a detection result"]},
              "reward": {"scored": False, "value": None, "unscored_reason": f"target lost: {e}"}},
             ensure_ascii=False, indent=1))
+        upload_bundle(ep_dir)
         return {"episode_dir": ep, "aborted": "target lost",
                 "grade": {"miss": None}, "counts": {}}
     finally:
@@ -839,6 +843,41 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         if os.environ.get("ICE_KEEP_LIVE_OVERLAY") != "1":
             vm.drop(live)       # the snapshots are the evidence; the working disk is not
         prune_disks()
+
+
+def upload_bundle(ep_dir: Path) -> None:
+    """Push the finished bundle to the intake service, so it does not only exist on a rented disk.
+
+    Failure here is reported and ignored: a bundle that is on this box and not yet uploaded is still
+    a bundle, and losing an episode to a network hiccup at the very end would be worse than the
+    thing this guards against. The token is host-only (see _HOST_ONLY) and never reaches the VM --
+    the machine inside it is the one under attack.
+    """
+    url = os.environ.get("ICE_INTAKE_URL")
+    if not url:
+        return
+    import tarfile
+    import urllib.error
+    import urllib.request
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for f in sorted(ep_dir.iterdir()):
+            if f.is_file():
+                tf.add(f, arcname=f.name)
+    body = buf.getvalue()
+    req = urllib.request.Request(
+        f"{url.rstrip('/')}/upload?episode={ep_dir.name}", data=body, method="POST",
+        headers={"Content-Type": "application/gzip",
+                 "X-Ice-Token": os.environ.get("ICE_INTAKE_TOKEN", "")})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            got = json.loads(r.read() or b"{}")
+        print(f"  [upload] {len(got.get('written') or [])} files, {len(body) / 1024:.0f} KiB "
+              f"-> {url}")
+    except urllib.error.HTTPError as e:
+        print(f"  !! upload refused: HTTP {e.code} {e.read()[:200].decode(errors='replace')}")
+    except Exception as e:                        # noqa: BLE001 - never lose an episode over this
+        print(f"  !! upload failed ({type(e).__name__}: {e}); the bundle is still at {ep_dir}")
 
 
 def prune_disks() -> None:

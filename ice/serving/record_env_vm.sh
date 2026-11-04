@@ -41,4 +41,9 @@ export ICE_RECORD_SETTLE="${ICE_RECORD_SETTLE:-60}"     # seconds for remediatio
 echo ">>> recording: RECORD_MODE=$ICE_RECORD_MODE AUTO_APPROVE=$ICE_AUTO_APPROVE DRY_RUN=$ICE_DRY_RUN" \
      "DENY_CRITICAL=$ICE_DENY_CRITICAL_ASSETS"
 echo ">>> force-escalate flag: $ICE_FORCE_ESCALATE_FLAG"
+# Where finished bundles go. The recording box is a rented instance and its disk goes with it, so a
+# bundle that exists only there is one release away from gone. ICE_INTAKE_* is host-only: the token
+# must not reach the VM, which is the machine under attack.
+export ICE_INTAKE_URL="${ICE_INTAKE_URL:-http://8.216.48.82:8137}"
+export ICE_INTAKE_TOKEN="${ICE_INTAKE_TOKEN:-}"
 echo ">>> dataset: $ICE_DATASET_DIR   state: $ICE_STATE_DIR"
