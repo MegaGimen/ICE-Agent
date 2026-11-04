@@ -120,6 +120,11 @@ def test_the_probe_runs_under_the_daemons_interpreter() -> None:
     assert "/root/ice-posture.env" in src
     # And it still goes through host_exec rather than ssh, which is what makes it the agent's.
     assert "IceTools" in src and "host_exec" in src
+    # A critical-asset command takes the ASK path even with the score provider off, and under
+    # ICE_AUTO_APPROVE it is the daemon's sweeper that approves and runs it. The daemon is stopped
+    # while the probe runs, so the probe finishes both steps itself or the command never executes --
+    # which is how two injections came back pending and changed nothing.
+    assert "on_approval" in src and "_AUTO_APPROVER" in src
 
 
 if __name__ == "__main__":

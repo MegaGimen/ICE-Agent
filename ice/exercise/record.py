@@ -136,8 +136,21 @@ def probe_exec(commands: List[str]) -> List[Dict[str, Any]]:
             "import json\n"
             "from ice.daemon.mcp_server import IceTools\n"
             "from ice.daemon.runtime import get_runtime\n"
-            f"res = IceTools(get_runtime()).host_exec({command!r}, 'probe: scoring test')\n"
-            "print(json.dumps(res.to_dict(), default=str))\n"
+            "from ice.daemon.orchestrator import Orchestrator\n"
+            "from ice.daemon.runtime import _AUTO_APPROVER\n"
+            "rt = get_runtime()\n"
+            f"res = IceTools(rt).host_exec({command!r}, 'probe: scoring test')\n"
+            "out = res.to_dict()\n"
+            # The gate puts a critical-asset command on the ASK path even with the score provider
+            # off, and under ICE_AUTO_APPROVE the daemon's sweeper is what approves it and runs it.
+            # The daemon is stopped while the probe runs -- deliberately, so the audit has one
+            # writer -- so the probe finishes the same two steps the agent's own actions take.
+            "if out.get('pending') and out.get('request_id'):\n"
+            "    Orchestrator(rt).on_approval(out['request_id'], True, _AUTO_APPROVER)\n"
+            "    p = rt.pending.get(out['request_id'])\n"
+            "    out['after_approval'] = {'status': getattr(p, 'status', None),\n"
+            "                             'result': getattr(p, 'result', None)}\n"
+            "print(json.dumps(out, default=str))\n"
             "EOF\n")
         p_ = vsh(script, label=f"probe-exec {command}", timeout=120)
         out.append({"command": command, "returncode": p_.returncode,
