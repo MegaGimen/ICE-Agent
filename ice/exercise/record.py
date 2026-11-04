@@ -400,6 +400,38 @@ def _listed_paths(out: str) -> List[str]:
     return [w for w in out.split() if w.startswith("/")]
 
 
+def pick_snapshots(armed_at: float) -> List[str]:
+    """The three osquery snapshots that bracket the episode, by their own timestamps.
+
+    Each snapshot is named for the time it was taken, so the recorder can choose them from the
+    arming time without asking ICE which ones it used. Falls back to the newest three when the
+    arming time is unknown, which is still three snapshots rather than none.
+    """
+    out = vsh(f"ls {STATE}/snapshots/*.json 2>/dev/null", timeout=60)
+    paths = sorted(_listed_paths(out.stdout))
+    if not paths:
+        print("  [osquery] the perception store has no snapshots")
+        return []
+
+    def stamp(path: str) -> float:
+        try:
+            return float(Path(path).stem)
+        except ValueError:
+            return 0.0
+
+    if not armed_at:
+        return paths[-3:]
+    before = [p for p in paths if stamp(p) and stamp(p) <= armed_at]
+    after = [p for p in paths if stamp(p) > armed_at]
+    picked = [p for p in (before[-1] if before else None,
+                          after[0] if after else None,
+                          paths[-1]) if p]
+    chosen = list(dict.fromkeys(picked))
+    print(f"  [osquery] {len(chosen)} snapshot(s) chosen around the arming time "
+          f"out of {len(paths)}")
+    return chosen
+
+
 def pull(remote: str, local: Path) -> bool:
     """Copy one file out of the VM."""
     from ice.exercise import vm
@@ -608,31 +640,25 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]],
             "scope_missed": scope_missed, "miss": not verdict_ok, "reasons": reasons}
 
 
-def _osquery_snapshots(ep_dir: Path, case: Dict[str, Any]) -> Dict[str, Any]:
-    """Load the T0/T1/T2 osquery snapshots collect() pulled out of the VM.
+def _osquery_snapshots(ep_dir: Path) -> Dict[str, Any]:
+    """Load the T0/T1/T2 osquery snapshots collect() pulled out of the VM, oldest first.
 
-    T2 is deliberately not the case's own t2 pointer. Approved actions execute one after another
-    over tens of seconds and ICE records t2 before the last of them has run, which once scored
-    `rm -f /etc/cron.d/persistevil` as not cleared in an episode whose audit shows it ran with rc=0.
-    The newest snapshot taken before the machine was shut down is the honest one.
+    No longer keyed on the case's own pointers. They were wrong once -- ICE records t2 before the
+    last approved action has run, which scored `rm -f /etc/cron.d/persistevil` as not cleared in an
+    episode whose audit shows it ran with rc=0 -- and on an episode with no case there are no
+    pointers at all, which left the runtime axis with a tool that errored on every call.
     """
     from ice.exercise import snapshot_reward as sr
-    ice = case.get("_ice") or {}
     files = sorted(ep_dir.glob("osq-*.json"), key=lambda p: p.stem)
     if not files:
         print("  [osquery] no snapshots were pulled out of the VM")
         return {}
-    by_stamp = {f.stem.replace("osq-", "").split(".")[0]: f for f in files}
-    snaps: Dict[str, Any] = {}
-    for label in ("t0", "t1"):
-        ts = ice.get(label)
-        hit = by_stamp.get(str(ts).split(".")[0]) if ts is not None else None
-        if hit is None:
-            print(f"  [osquery] {label.upper()}={ts} not among the pulled snapshots")
-            continue
-        snaps[label] = sr.load(hit)
-    newest = max(files, key=lambda p: float(p.stem.replace("osq-", "")))
-    snaps["t2"] = sr.load(newest)
+    labels = ("t0", "t1", "t2")
+    if len(files) < 3:
+        print(f"  [osquery] only {len(files)} snapshot(s); the runtime tables will be partial")
+    snaps = {lab: sr.load(f) for lab, f in zip(labels, files[:3])}
+    if len(files) > 3:                                   # keep the newest as the end state
+        snaps["t2"] = sr.load(files[-1])
     return snaps
 
 
@@ -725,12 +751,10 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
          "baseline_to_final": diffs["after"]}, ensure_ascii=False, indent=1))
     write_evidence(ep_dir, images, diffs)
 
-    runtime = {}
-    if case:
-        runtime = _osquery_snapshots(ep_dir, case)
-        if runtime:
-            (ep_dir / "runtime-snapshots.json").write_text(json.dumps(
-                {k: bool(v) for k, v in runtime.items()}, indent=1))
+    runtime = _osquery_snapshots(ep_dir)
+    if runtime:
+        (ep_dir / "runtime-snapshots.json").write_text(json.dumps(
+            {k: bool(v) for k, v in runtime.items()}, indent=1))
     print(f"  evidence: {len(diffs['before'])} paths the attack changed, "
           f"{len(diffs['after'])} changed at the end | runtime snapshots: "
           f"{sorted(k for k, v in runtime.items() if v) or 'none'}")
@@ -779,23 +803,26 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     return out
 
 
-def collect(ep_dir: Path, case: Optional[Dict[str, Any]]) -> None:
+def collect(ep_dir: Path, case: Optional[Dict[str, Any]], armed_at: float = 0.0) -> None:
     """Copy what ICE wrote inside the VM into the bundle, while the VM is still up.
 
     The osquery snapshots in particular cannot wait: the perception store keeps only the last 240,
     two hours at a 30 second cycle, and prunes the rest.
+
+    Which snapshots to take used to come from the case's own t0/t1 pointers, which has two faults.
+    An episode with no case got none at all -- which is every benign episode, and the judge's
+    runtime axis then had nothing to work with and burned its whole step budget on a tool that
+    errored. And the pointers were wrong once already: ICE records t2 before the last approved
+    action has finished running. The arming time is something the recorder knows for itself, so the
+    snapshots are chosen by it instead: the last one before the attack was armed, the first one
+    after, and the newest of all.
     """
     ep_dir.mkdir(parents=True, exist_ok=True)
     pull(f"{STATE}/audit.jsonl", ep_dir / "ice-audit.jsonl")
     listing = vsh(f"ls {STATE}/cases/case-*.json 2>/dev/null", timeout=60)
     for path in _listed_paths(listing.stdout):
         pull(path, ep_dir / Path(path).name)
-    ice = (case or {}).get("_ice") or {}
-    wanted = [str(ice.get(k)).split(".")[0] for k in ("t0", "t1") if ice.get(k)]
-    snaps = vsh(f"ls -t {STATE}/snapshots/*.json 2>/dev/null | head -1; "
-                + "; ".join(f"ls {STATE}/snapshots/{w}*.json 2>/dev/null" for w in wanted),
-                timeout=60)
-    for path in dict.fromkeys(_listed_paths(snaps.stdout)):
+    for path in pick_snapshots(armed_at):
         pull(path, ep_dir / ("osq-" + Path(path).name))
     pull("/root/ice-build/daemon.log", ep_dir / "daemon.log")
 
@@ -803,7 +830,7 @@ def collect(ep_dir: Path, case: Optional[Dict[str, Any]]) -> None:
     # been shut down to be snapshotted, so every ssh it made failed and every episode so far
     # recorded transcript_events: 0 -- the agent's investigation, which is the point of the
     # dataset, was the one thing not being saved.
-    if case:
+    if case:                                             # a trajectory needs a case to belong to
         sid = _session_id_for(str(case.get("case_id")))
         traj = _transcript(sid, ep_dir) if sid else {"error": "no openclaw session for case"}
         (ep_dir / "agent-trajectory.json").write_text(json.dumps(traj, ensure_ascii=False, indent=1))
@@ -973,7 +1000,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
             probe["exec"] = probe_exec(PROBE_EXEC)
 
         ep_dir = DATASET / ep
-        collect(ep_dir, case)
+        collect(ep_dir, case, armed_at=armed)
         collect_host_side(ep_dir, live)
         stop_daemon()
         vm.shutdown(live)
