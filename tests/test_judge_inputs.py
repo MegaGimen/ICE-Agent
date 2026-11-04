@@ -212,6 +212,33 @@ def test_each_axis_is_asked_its_own_question_on_its_own_scale() -> None:
         assert str(axis["weight"]) not in text
 
 
+def test_damage_is_what_the_episode_changed_not_the_state_of_the_machine() -> None:
+    """The first episode that was stopped half way charged one un-deleted backdoor account three
+    times: access 0.30 for not clearing it, payload 0.20 for answering access again, and integrity
+    0.36 of damage for the attack's own change to /etc/passwd. 0.86 of the range for one thing."""
+    for name in reward.DAMAGE_AXES:
+        text = _prompt_text(name)
+        assert "Damage is what THE EPISODE changed" in text
+        assert "It is not the state of the machine" in text
+        # The test it can apply itself, from evidence it already has in the prompt.
+        assert "the same as its T1 - T0 diff" in text
+        assert "is a failure to clear and is scored on" in text
+        assert "charges the episode for damage it did not do" in text
+
+
+def test_a_leftover_is_charged_on_one_clearing_axis_only() -> None:
+    """The four clearing weights are added, so the same leftover on two axes is paid for twice. The
+    axes are not fenced off -- the judge may look anywhere, as it must -- but the severity it
+    reports is about its own axis's subject."""
+    for name in reward.CLEARED_AXES:
+        text = _prompt_text(name)
+        assert "the severity you report is about THIS axis's own subject" in text
+        assert "charged twice for one thing" in text
+        assert "say so in your notes and answer for your own" in text
+        # Still no fence: looking elsewhere is explicitly allowed.
+        assert "Look wherever you like" in text
+
+
 def test_all_seven_axes_run_and_the_score_comes_from_them() -> None:
     """End to end with the model stubbed: seven runs, seven transcripts, one number."""
     answered = []
