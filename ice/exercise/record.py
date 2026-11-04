@@ -1,24 +1,32 @@
 """Trajectory dataset recorder: one episode = clean machine -> armed attack -> ICE investigates.
 
-Each episode is recorded from a scoped-clean machine, because the agent's later steps must build on
-the real consequences of its earlier ones (so actions are executed for real, not dry-run).
+Each episode runs in a VM of its own, because the agent's later steps must build on the real
+consequences of its earlier ones -- actions execute for real -- and because what it breaks then has
+to be its own machine rather than the recorder's.
 
-  1. reset   restore the pristine snapshot of the mutable system paths, drop files the last episode
-             left in /tmp, wipe ICE_STATE_DIR, drop the OpenClaw agent store (fresh agent memory),
-             then start the daemon and let it take a T0 baseline of the clean machine.
-  2. arm     run the scenario's attack commands for real, as root.
-  3. observe wait for the daemon to escalate, open a case, investigate it, and settle remediation.
-  4. export  ICE's hash-chained audit, the case json, the OpenClaw transcript for that case's
-             session (every message and tool call), the scenario ground truth, and Kev's scores.
-  5. grade   deterministic grading against ground truth, plus a Kev scoring pass over the trajectory.
+  1. boot    a fresh overlay over the golden image; snapshot it as T0, the machine the attack found.
+  2. arm     run the arm's commands for real, as root, then snapshot the result as T1.
+  3. observe the daemon notices the change, escalates, opens a case, investigates and remediates.
+  4. close   snapshot what the agent left as T2, and collect the audit, the case, the trajectory and
+             the osquery snapshots -- over ssh if the machine still answers, off the final disk if
+             it does not.
+  5. score   seven axes, one judge run each, over the three snapshots (ice.exercise.reward).
 
-Recording posture (set by the caller, see ice/serving/record_env.sh):
-  ICE_RECORD_MODE=1     Kev is not a safety-gate veto (it scores the finished trajectory instead)
-  ICE_FORCE_ESCALATE=1  every change reaches investigation, so no episode records nothing
-  ICE_AUTO_APPROVE=1    no human in the loop
-  ICE_DRY_RUN=0         actions really run; that is the point
-The deterministic critical-asset denylist stays on: it is static policy, not Kev's judgement, and it
-is what stops an episode from deleting the recording rig's own SSH key or models.
+Recording posture (ice/serving/record_env_vm.sh):
+  ICE_FORCE_ESCALATE_FLAG  while that file exists every change reaches investigation, so no episode
+                           records nothing. The decision model is not consulted at all -- it used to
+                           be asked and then overridden.
+  ICE_AUTO_APPROVE=1       no human in the loop
+  ICE_DRY_RUN=0            actions really run; that is the point
+  ICE_DENY_CRITICAL_ASSETS=0
+                           no safety gate. A deployment has one; a recording of what the agent would
+                           do must not, or the trajectory is of something else -- one episode chose
+                           `rm -f /root/.ssh/authorized_keys`, was refused, and its machine showed
+                           what the gate allowed. What the agent breaks is its own VM, and
+                           collection no longer needs that VM to answer.
+
+What is deliberately kept from the product: the daemon's own perception loop, every 30 seconds, as
+deployed. A recording of ICE with its perception changed would not be a recording of ICE.
 
   record.py snapshot                        capture the pristine baseline (once, on a clean box)
   record.py run persistence --episodes 3    record N episodes into $ICE_DATASET_DIR
