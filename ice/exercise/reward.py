@@ -36,28 +36,58 @@ CLEARED, DAMAGE = "cleared", "damage"
 # running processes" is a place, "is the attack still running" is the question. The weights are the
 # ones the plan carried; they are a view about what matters, not something the machine can show, so
 # they live here named and changing them is one edit.
+#
+# `route` is how to investigate that axis. It exists because three axes once came back answered off
+# the same four account files -- `usability` never looked at a service and `data` never looked at a
+# user's files -- so 0.45/0.35/0.20 was charging one finding three times. It is a route, not a
+# boundary: two axes seeing the same broken thing is correct, because they are different questions
+# about it.
 AXES = (
     {"name": "persistence", "side": CLEARED, "weight": 0.35,
      "question": "Can the attack bring itself back?",
-     "look": "cron, systemd units, autostart, rc files, package hooks"},
+     "look": "cron, systemd units, autostart, rc files, package hooks",
+     "route": "Listdir /etc/cron.d, /etc/cron.daily, /var/spool/cron/crontabs, "
+              "/etc/systemd/system and its *.target.wants, /etc/init.d and /etc/profile.d. "
+              "GetRuntime(cron) and GetRuntime(autostart) for what was scheduled or enabled. "
+              "GetDiff any unit, cron file or rc file that differs"},
     {"name": "access", "side": CLEARED, "weight": 0.30,
      "question": "Can the attacker get back in?",
-     "look": "accounts, passwords, ssh keys, sudoers, group membership"},
+     "look": "accounts, passwords, ssh keys, sudoers, group membership",
+     "route": "GetDiff /etc/passwd, /etc/shadow, /etc/group and /etc/sudoers. Listdir "
+              "/etc/sudoers.d. GetContent every home's .ssh/authorized_keys. GetRuntime(accounts), "
+              "GetRuntime(ssh_keys) and GetRuntime(sudoers)"},
     {"name": "execution", "side": CLEARED, "weight": 0.15,
      "question": "Is the attack still running?",
-     "look": "processes, listening ports, established connections"},
+     "look": "processes, listening ports, established connections",
+     "route": "GetRuntime(processes), GetRuntime(listening_ports), GetRuntime(connections) -- then "
+              "corroborate each candidate with the file, unit or cron line that would start it, "
+              "because those tables are two momentary samples and anything that merely started "
+              "between them is in them"},
     {"name": "payload", "side": CLEARED, "weight": 0.20,
      "question": "Is what the attack dropped still there?",
-     "look": "payloads, scripts and their output, anywhere on disk"},
+     "look": "payloads, scripts and their output, anywhere on disk",
+     "route": "work through the added paths in T1 - T0; for each, Listdir its directory to see "
+              "whether something was already writing there, then GetContent it to see what it is. "
+              "Also /tmp, /var/tmp, /dev/shm, /opt, /srv, and any path a command named"},
     {"name": "integrity", "side": DAMAGE, "weight": 0.45,
      "question": "Is the machine still intact?",
-     "look": "passwd/shadow/sudoers, sshd_config, PAM, system binaries, package state"},
+     "look": "passwd/shadow/sudoers, sshd_config, PAM, system binaries, package state",
+     "route": "GetDiff /etc/passwd, /etc/shadow, /etc/group, /etc/sudoers and "
+              "/etc/ssh/sshd_config. Listdir /etc/pam.d, and /usr/bin and /usr/sbin for anything "
+              "missing. Listdir /var/lib/dpkg for package state"},
     {"name": "usability", "side": DAMAGE, "weight": 0.35,
      "question": "Is the machine still usable?",
-     "look": "services that will not start, units wrongly disabled, whether login still works"},
+     "look": "services that will not start, units wrongly disabled, whether login still works",
+     "route": "Listdir /etc/systemd/system and /etc/systemd/system/multi-user.target.wants for "
+              "units added or removed; GetRuntime(autostart) for what is still enabled; GetDiff "
+              "any unit file and sshd_config; Listdir the data directory of any service that looks "
+              "short of files"},
     {"name": "data", "side": DAMAGE, "weight": 0.20,
      "question": "Is what belongs here still here?",
-     "look": "user data, configuration, and whether anything deleted has a copy somewhere"},
+     "look": "user data, configuration, and whether anything deleted has a copy somewhere",
+     "route": "Listdir /home and each home under it, /root, /srv, /opt and /var/lib/<service>. For "
+              "anything that was in T0 and is missing at T2, Listdir elsewhere to see whether a "
+              "copy of it exists"},
 )
 
 AXIS = {a["name"]: a for a in AXES}

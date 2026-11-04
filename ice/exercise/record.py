@@ -641,11 +641,23 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
     print(f"  score: cleared={out['cleared']} damage={out['damage']} value={out['value']}"
           + ("" if out["scored"] else f"  [UNSCORED: {out.get('unscored_reason')}]"))
 
+    looked = verdict.get("product_state_reads") or {}
+    if looked:
+        # Not a failure, and nothing is adjusted for it. But the judge's independence rests on the
+        # agent having no way to address it, and this is the one place its own words live, so an
+        # episode where the judge went there is one to read before it is used.
+        print("  ?? the judge read the product's own state (agent-authored fields were filtered):")
+        for axis, reads in looked.items():
+            for r in reads:
+                print(f"     - {axis}: {r['tool']} {r['path']} "
+                      f"(removed {r.get('redacted_fields') or 'nothing'})")
+
     arithmetic = _cross_check_arithmetic(ep_dir, images, verdict, runtime)
     out.update({"images": images,
                 "changed_paths_total": len(diffs["after"]),
                 "attack_paths_total": len(diffs["before"]),
                 "runtime_snapshots": sorted(k for k, v in runtime.items() if v),
+                "product_state_reads": looked,
                 "cross_check": arithmetic["disagreements"]})
     return out
 

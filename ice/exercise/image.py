@@ -224,6 +224,7 @@ def listdir(path: str, snapshots: Dict[str, str]) -> Dict[str, Any]:
     kinds = {FILE: "file", DIR: "dir", LINK: "symlink"}
     seen: Dict[str, Dict[str, Any]] = {}
     present: List[str] = []
+    totals: Dict[str, int] = {name: 0 for name in snapshots}
     for name, label in snapshots.items():
         d = root(label) / path.lstrip("/")
         if not d.is_dir():
@@ -240,10 +241,19 @@ def listdir(path: str, snapshots: Dict[str, str]) -> Dict[str, Any]:
             row["in"].append(name)
             row["kind"][name] = kinds[kind]
             row["size"][name] = st.st_size
+            totals[name] += 1
     for row in seen.values():
         row["gone"] = [n for n in snapshots if n in present and n not in row["in"]]
     out["directory_in"] = present
     out["count"] = len(seen)
+    # How many entries each snapshot holds, and the ones that exist only in the last snapshot.
+    # Both are plain facts, and together they settle a question the per-entry rows do not: a
+    # directory that already held entries of this shape before anything happened and is *still*
+    # gaining them afterwards is being written by something that runs on its own. Counting the rows
+    # by hand to see that is work a reader will skip.
+    last = list(snapshots)[-1] if snapshots else ""
+    out["entries_per_snapshot"] = totals
+    out["only_in_" + last] = sorted(k for k, v in seen.items() if v["in"] == [last]) if last else []
     out["entries"] = [seen[k] for k in sorted(seen)]
     if not present:
         out["error"] = f"{path} is not a directory in any of {list(snapshots)}"

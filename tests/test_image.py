@@ -260,6 +260,37 @@ def test_only_this_episodes_vm_answers_for_the_live_machine(tmp_path: Path) -> N
     assert image.episode_of("mine-final") == image.episode_of("mine-live") == "mine"
 
 
+def test_listdir_shows_a_mechanism_still_writing(tmp_path: Path) -> None:
+    """The directory is what tells a drop from a machine's own output, and the per-snapshot totals
+    are what make it readable at a glance.
+
+    This is the case the judge got wrong: it called three of ICE's own monitoring files and a
+    rotated log "attack-created", because they first appear between T0 and T1. The directory says
+    otherwise -- it already held the same shape of entry at T0 and gains more at T2, after the
+    attack window closed, so something that runs on its own owns all of them.
+    """
+    _three(tmp_path,
+           {"state/snaps/1.json": "{}", "state/snaps/2.json": "{}",
+            "etc/cron.d/.placeholder": ""},
+           {"state/snaps/1.json": "{}", "state/snaps/2.json": "{}", "state/snaps/3.json": "{}",
+            "etc/cron.d/.placeholder": "", "etc/cron.d/evil": "* * * * * root /opt/x\n"},
+           {"state/snaps/1.json": "{}", "state/snaps/2.json": "{}", "state/snaps/3.json": "{}",
+            "state/snaps/4.json": "{}", "etc/cron.d/.placeholder": ""})
+    snaps = {"T0": "T0", "T1": "T1", "T2": "T2"}
+
+    # A mechanism: already there at T0, still gaining entries at T2.
+    mech = image.listdir("/state/snaps", snaps)
+    assert mech["entries_per_snapshot"] == {"T0": 2, "T1": 3, "T2": 4}
+    assert mech["only_in_T2"] == ["4.json"]
+
+    # A drop: nothing of its shape at T0, nothing new at T2, and gone by the end.
+    drop = image.listdir("/etc/cron.d", snaps)
+    assert drop["entries_per_snapshot"] == {"T0": 1, "T1": 2, "T2": 1}
+    assert drop["only_in_T2"] == []
+    evil = [e for e in drop["entries"] if e["name"] == "evil"][0]
+    assert evil["in"] == ["T1"] and evil["gone"] == ["T0", "T2"]
+
+
 if __name__ == "__main__":
     import tempfile
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

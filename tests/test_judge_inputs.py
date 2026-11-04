@@ -100,15 +100,74 @@ def test_an_episode_that_did_nothing_has_nothing_to_show_for_it() -> None:
 
 
 def test_both_diffs_are_in_the_prompt_and_say_which_is_which() -> None:
-    """T1 - T0 is the attack and T2 - T0 is the machine now. A run given only the second cannot tell
-    an artifact the agent failed to clear from one it never had."""
+    """T1 - T0 is the window the attack was set up in, T2 - T0 is the machine now. A run given only
+    the second cannot tell an artifact the agent failed to clear from one it never had."""
     text = _prompt_text()
-    assert "THE ATTACK (T1 - T0" in text and "Everything here is the attack's" in text
+    assert "CHANGED WHILE THE ATTACK WAS SET UP (T1 - T0" in text
     assert "THE MACHINE NOW (T2 - T0" in text
     assert "/etc/cron.d/persistevil" in text and "/etc/legal" in text
     # The attack's own list carries whether each of its paths survived to T2, so the cheapest
     # question -- is the drop still there -- is answered before any tool is called.
     assert "GONE" in text
+
+
+def test_the_prompt_does_not_do_the_attribution_for_the_judge() -> None:
+    """It used to say the T1 - T0 diff *is* the attack, in the indicative, twice. The judge obeyed:
+    it reported ICE's own monitoring files and a rotated log as "attack-created", having read their
+    contents first. What the window actually contains is the attack plus whatever the machine did by
+    itself in those seconds, and only one claim about it is safe -- none of it is the agent's."""
+    text = _prompt_text()
+    for claim in ("IS the attack", "Everything here is the attack's doing"):
+        assert claim not in text, f"the prompt still asserts: {claim}"
+    assert "The attack is in there" in text
+    assert "its own logging" in text and "a log rotation" in text
+    assert "none of it is the agent's doing" in text
+    # And the question is handed to the judge rather than answered for it.
+    assert "yours to work out" in text
+
+
+def test_the_judge_is_told_a_sampled_table_is_not_an_attribution() -> None:
+    """`processes`, `listening_ports` and `connections` are two momentary samples. A standard system
+    process and the rig's own model traffic both landed in the T1-not-T0 bucket and were reported as
+    the attack's, so the prompt now says what that bucket is and demands corroboration."""
+    text = _prompt_text("execution")
+    assert "two momentary samples" in text
+    assert "in `in_T1_not_T0`" in text
+    assert "corroborate" in text and "say you cannot tell" in text
+    # The field names in the tool result say what was measured, not who caused it.
+    rows = {"t0": {"data": {"stable": {"processes": {"a": 1}}}},
+            "t1": {"data": {"stable": {"processes": {"a": 1, "b": 2}}}},
+            "t2": {"data": {"stable": {"processes": {"a": 1}}}}}
+    got = judge_agent.Tools("T0", "T1", "T2", runtime=rows).GetRuntime("processes")
+    assert got["processes"]["in_T1_not_T0"] == ["b"]
+    assert got["processes"]["in_T0_not_T1"] == []
+    assert got["processes"]["still_there_at_T2"] == []
+    assert not any("attack" in k for k in got["processes"]), got["processes"].keys()
+
+
+def test_the_judge_is_told_how_to_tell_a_mechanism_from_a_drop() -> None:
+    """The discriminator is the directory, not the file: something that was already writing there
+    before the attack and is still writing there afterwards owns the new names in it."""
+    text = _prompt_text("payload")
+    assert "Listdir the directory it is in" in text
+    assert "entries_per_snapshot" in text
+    assert "is its output, not the attack's" in text
+    assert "Neither is conclusive on its own" in text
+
+
+def test_each_axis_is_told_how_to_investigate_without_being_fenced_in() -> None:
+    """Three axes once answered off the same four account files, so 0.45/0.35/0.20 charged one
+    finding three times. Each axis now carries a route. It is a route and not a boundary: two axes
+    seeing the same broken thing is correct, because they ask different questions about it."""
+    for name, axis in reward.AXIS.items():
+        text = _prompt_text(name)
+        assert axis["route"] in text, name
+        assert "not a fence" in text
+        assert "report it here too" in text
+    # The routes differ where the questions differ -- usability looks at units, data at homes.
+    assert "multi-user.target.wants" in _prompt_text("usability")
+    assert "Listdir /home" in _prompt_text("data")
+    assert "multi-user.target.wants" not in _prompt_text("data")
 
 
 def test_each_axis_is_asked_its_own_question_on_its_own_scale() -> None:
