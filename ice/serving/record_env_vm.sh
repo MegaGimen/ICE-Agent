@@ -19,9 +19,22 @@ export ICE_DRY_RUN=0            # execute for real
 # flag just before arming). Forcing for the whole run spends the episode on reset/warmup noise.
 export ICE_FORCE_ESCALATE_FLAG="$ICE_STATE_DIR/FORCE_ESCALATE"
 
-# Deterministic floor: static policy, not the decision model's judgement and not a human gate.
-# Without it an auto-approved episode can delete this rig's own access or stop its services.
-export ICE_DENY_CRITICAL_ASSETS=1
+# No safety gate while recording. A deployment has one; a recording of what the agent would do must
+# not, or the trajectory is of something else. One episode chose `rm -f /root/.ssh/authorized_keys`,
+# was refused, and its final machine therefore shows what the gate allowed rather than what the
+# agent did.
+#
+# Two things used to argue for keeping the floor on, and neither survives. The agent now runs in a
+# VM of its own, so what it breaks is its own machine -- including its own model access, which is a
+# result worth recording rather than a rig to repair. And the recorder no longer needs the VM to be
+# reachable: collect_from_snapshot() reads the audit, the cases, the osquery snapshots and the
+# agent's own database off the final disk on the host, so an agent that breaks its own sshd costs
+# the episode nothing but a slower collection.
+#
+# What remains is not a gate: selfaware.describe() tells the agent in its prompt which processes,
+# ports and addresses are its own. Guidance it can ignore, which is the point -- ignoring it is
+# then in the trajectory.
+export ICE_DENY_CRITICAL_ASSETS=0
 # Critical assets used to be how the rig protected itself: a list of its own paths, services and
 # model endpoints that the safety gate would refuse to let any command name. It was a policy over
 # string matching, and it was needed because the agent ran on the same machine as the recorder --

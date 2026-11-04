@@ -67,6 +67,42 @@ def test_the_benign_arm_inverts_what_correct_means() -> None:
     assert record.grade(S, None, attack)["miss"] is True
 
 
+def test_the_recording_posture_has_no_safety_gate() -> None:
+    """A deployment has a gate; a recording of what the agent would do must not, or the trajectory
+    is of something else. One episode chose `rm -f /root/.ssh/authorized_keys` and was refused, so
+    its final machine shows what the gate allowed rather than what the agent did.
+
+    Asserted here because turning it back on is one character, and the episode would still look
+    fine -- the distortion is invisible in the bundle unless you read the refusals.
+    """
+    posture = Path(__file__).resolve().parents[1] / "ice" / "serving" / "record_env_vm.sh"
+    text = posture.read_text()
+    assert "export ICE_DENY_CRITICAL_ASSETS=0" in text
+    assert "export ICE_DENY_CRITICAL_ASSETS=1" not in text
+    # And the two reasons it is now safe to be off, so it is not turned back on for the old ones.
+    assert "VM of its own" in text
+    assert "collect_from_snapshot" in text
+    # What replaces it is guidance in the prompt, not a veto.
+    assert "selfaware.describe()" in text and "Guidance it can ignore" in text
+
+
+def test_collection_does_not_need_the_vm_to_be_reachable() -> None:
+    """Everything the recorder takes out of the VM is on the disk it snapshots, so the gate's last
+    argument -- that it kept the rig alive -- no longer holds."""
+    import inspect
+
+    from ice.exercise import record
+
+    src = inspect.getsource(record.collect_from_snapshot)
+    for artefact in ("audit.jsonl", "daemon.log", "case-", "snapshots", "openclaw-agent.sqlite"):
+        assert artefact in src, artefact
+    # The session is resolved out of the database rather than from the openclaw CLI over ssh.
+    assert "session_nodes" in inspect.getsource(record._session_from_db)
+    # And it runs after the final snapshot, where the disk is readable and the machine is down.
+    run = inspect.getsource(record.run_episode)
+    assert run.index('vm.snapshot(images["final"]') < run.index("collect_from_snapshot(")
+
+
 if __name__ == "__main__":
     test_each_arm_brings_its_own_commands_and_its_own_markers()
     test_the_benign_arm_inverts_what_correct_means()

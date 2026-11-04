@@ -527,7 +527,16 @@ def _transcript(session_id: str, ep_dir: Path) -> Dict[str, Any]:
         return {"error": f"could not copy {AGENT_DB} out of the VM"}
     for c in companions:
         pull(str(AGENT_DB) + c.name[len(local.name):], c)
-    db = sqlite3.connect(f"file:{local}?mode=ro", uri=True)
+    try:
+        return _read_transcript(local, session_id)
+    finally:
+        for f in [local, *companions]:
+            f.unlink(missing_ok=True)
+
+
+def _read_transcript(db_path: Path, session_id: str) -> Dict[str, Any]:
+    """The transcript and trajectory rows for one session, out of an agent database."""
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
         def rows(sql: str) -> List[Dict[str, Any]]:
             out = []
@@ -548,8 +557,6 @@ def _transcript(session_id: str, ep_dir: Path) -> Dict[str, Any]:
         return {"error": f"agent db unreadable: {e}"}
     finally:
         db.close()
-        for f in [local, *companions]:
-            f.unlink(missing_ok=True)
 
 
 def kev_score(scenario: Scenario, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
@@ -851,6 +858,107 @@ def collect_host_side(ep_dir: Path, live: str) -> None:
         shutil.copy2(console, ep_dir / "vm-console.log")
 
 
+def collect_from_snapshot(ep_dir: Path, label: str, case: Optional[Dict[str, Any]],
+                          armed_at: float = 0.0) -> Dict[str, str]:
+    """Fill in whatever ssh could not pull, by reading the episode's final disk on the host.
+
+    Everything the recorder takes out of the VM -- the audit, the cases, the osquery snapshots, the
+    daemon log, the agent's own database -- is on that disk, and the disk is mounted read-only here
+    with the machine shut down. So none of it actually requires the VM to be reachable.
+
+    That matters because the recorder's dependence on ssh was the last argument for keeping a safety
+    gate in a recording. The gate's only remaining veto was a list of paths and services the agent
+    was refused -- sshd and osqueryd among them -- and the comment in the daemon said plainly that
+    it was what kept the rig alive. It also distorted what was being recorded: in one episode the
+    agent chose `rm -f /root/.ssh/authorized_keys`, was refused, and the machine therefore does not
+    show what the agent did. With this, an agent that breaks its own sshd costs the episode nothing
+    but a slower collection, so the gate can come off and the trajectory is still the agent's own.
+
+    The database is read where it lies rather than copied: the VM is shut down before the snapshot
+    is taken, so sqlite has checkpointed its WAL and closed cleanly, which is a better copy than the
+    live one this falls back from.
+    """
+    from ice.exercise import image
+    recovered: Dict[str, str] = {}
+    try:
+        root = image.root(label)
+    except Exception as e:                                  # noqa: BLE001 - report, never raise
+        print(f"  !! could not mount {label} to recover from: {e}")
+        return {"error": f"{type(e).__name__}: {e}"}
+
+    def want(local: Path) -> bool:
+        return not local.exists() or local.stat().st_size == 0
+
+    def take(src: Path, local: Path, what: str) -> None:
+        if not want(local) or not src.exists():
+            return
+        try:
+            local.write_bytes(src.read_bytes())
+        except OSError as e:
+            print(f"  !! {what}: {e}")
+            return
+        recovered[what] = str(src)[len(str(root)):]
+
+    take(root / "root/ice-state/audit.jsonl", ep_dir / "ice-audit.jsonl", "audit")
+    take(root / "root/ice-build/daemon.log", ep_dir / "daemon.log", "daemon.log")
+    cases = sorted((root / "root/ice-state/cases").glob("case-*.json"))
+    for src in cases:
+        take(src, ep_dir / src.name, f"case {src.stem}")
+    if not list(ep_dir.glob("osq-*.json")):
+        snaps = sorted((root / "root/ice-state/snapshots").glob("*.json"))
+        stamps = [(float(x.stem), x) for x in snaps if x.stem.replace(".", "", 1).isdigit()]
+        pick = ([max((s for s in stamps if s[0] <= armed_at), default=(0, None))[1]]
+                + [min((s for s in stamps if s[0] > armed_at), default=(0, None))[1]]
+                + [stamps[-1][1] if stamps else None]) if armed_at else [x for _, x in stamps[-3:]]
+        for src in dict.fromkeys(x for x in pick if x is not None):
+            take(src, ep_dir / ("osq-" + src.name), f"osquery {src.stem}")
+
+    traj = ep_dir / "agent-trajectory.json"
+    if case and want_traj(traj):
+        db = root / "root/.openclaw/agents/main/agent/openclaw-agent.sqlite"
+        sid = _session_from_db(db, str(case.get("case_id")))
+        if sid:
+            got = _read_transcript(db, sid)
+            traj.write_text(json.dumps(got, ensure_ascii=False, indent=1))
+            recovered["trajectory"] = f"{len(got.get('transcript_events') or [])} events from {sid}"
+        else:
+            print(f"  !! no session for {case.get('case_id')} in the snapshot's agent database")
+    if recovered:
+        print(f"  [recover] read off the final disk without ssh: {sorted(recovered)}")
+    return recovered
+
+
+def want_traj(traj: Path) -> bool:
+    """Is the trajectory missing, empty, or an error record from a failed pull?"""
+    if not traj.exists() or traj.stat().st_size == 0:
+        return True
+    try:
+        got = json.loads(traj.read_text())
+    except (OSError, json.JSONDecodeError):
+        return True
+    return bool(got.get("error")) or not got.get("transcript_events")
+
+
+def _session_from_db(db_path: Path, case_id: str) -> Optional[str]:
+    """The agent session for one case, resolved out of the database instead of over ssh.
+
+    `session_nodes` keys a session by `agent:main:<case id>`, which is the same association the
+    openclaw CLI reports; reading it here removes the last reason collection needed the VM up.
+    """
+    if not db_path.exists():
+        return None
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        for key, sid in db.execute("SELECT session_key, current_session_id FROM session_nodes"):
+            if str(key).endswith(":" + case_id):
+                return sid
+    except sqlite3.DatabaseError:
+        return None
+    finally:
+        db.close()
+    return None
+
+
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
            images: Optional[Dict[str, str]] = None,
            probe: Optional[Dict[str, Any]] = None,
@@ -1005,6 +1113,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         stop_daemon()
         vm.shutdown(live)
         vm.snapshot(images["final"], of=live)
+        probe["recovered_without_ssh"] = collect_from_snapshot(ep_dir, images["final"], case, armed)
         meta = export(ep_dir, scenario, case, armed, images, probe=probe, arm=arm)
         if dirty:
             meta["golden_image_residue"] = dirty
