@@ -257,7 +257,13 @@ class Tools:
         """
         snaps = {k: self.runtime.get(k) for k in ("t0", "t1", "t2")}
         if not any(snaps.values()):
-            return {"error": "no host-monitor snapshots were collected for this episode"}
+            # Said plainly, because a bare error was read as "try another table": one axis called
+            # this thirty times over ten steps, never reached a verdict, and the episode could not
+            # be scored at all.
+            return {"error": "no host-monitor snapshots were collected for this episode",
+                    "unavailable": "This tool has no data for this episode and no table will "
+                                   "return any. Do not call it again. Answer from the files, and "
+                                   "if your axis cannot be settled without it, say so."}
 
         def rows(snap: Optional[Dict[str, Any]], name: str) -> Dict[str, Any]:
             data = ((snap or {}).get("data") or {})
@@ -424,7 +430,16 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
             f"{ref_lines[:2000]}\n\nYour question: {a['question']}  Begin."}]
 
     usage = {"prompt_tokens": 0, "completion_tokens": 0}
+    nudged = False
     for step in range(max_steps):
+        # Two steps from the end, say so. Running out used to produce no verdict at all, which
+        # costs the whole episode its score -- an answer drawn from an incomplete look is worth
+        # more than that, and it can say in its evidence that the look was incomplete.
+        if step == max_steps - 2:
+            messages.append({"role": "user", "content":
+                             f"You have one step left of {max_steps}. Answer now with the JSON "
+                             f"object, from what you have seen; if you could not finish looking, "
+                             f"say so in the evidence."})
         resp = _post({"model": MODEL, "max_tokens": 4096, "messages": messages,
                       "tools": TOOLS, "tool_choice": "auto"})
         if resp.get("_error"):
@@ -441,6 +456,15 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
             text = msg.get("content") or ""
             obj = json_object(text)
             if obj is None:
+                # A reply with neither a tool call nor an object is a stall, and one real episode
+                # stalled with an entirely empty message. Ask once: a single turn is cheaper than
+                # losing the axis, and losing one axis leaves the whole episode unscored.
+                if not nudged:
+                    nudged = True
+                    messages.append({"role": "user", "content":
+                                     "That reply had no tool call and no JSON object in it. Reply "
+                                     "now with the JSON object for this axis and nothing else."})
+                    continue
                 return {"axis": axis, "error": "no JSON object in the final reply",
                         "raw_head": text[:800], "raw_tail": text[-800:], "steps": step + 1,
                         "tool_calls": tools.calls, "usage": usage, "transcript": messages}

@@ -286,6 +286,41 @@ def test_all_seven_axes_run_and_the_score_comes_from_them() -> None:
     assert scored["scored"] is True and scored["value"] == 1.0
 
 
+def test_a_stall_is_nudged_once_and_a_budget_is_announced() -> None:
+    """Three axes of one benign episode produced no verdict, which left the whole episode unscored.
+    One replied with an entirely empty message; two spent all ten steps and were cut off mid-look.
+    Neither needs to cost an axis: ask the staller once, and tell the others before the budget is
+    gone so the answer comes from an incomplete look rather than not at all."""
+    seen = []
+
+    def fake_post(body):
+        seen.append(body["messages"][-1])
+        n = len([m for m in body["messages"] if m.get("role") == "assistant"])
+        if n < 1:
+            return {"model": "stub", "choices": [{"message": {"content": ""}}]}   # the stall
+        return {"model": "stub", "choices": [{"message": {"content": json.dumps(
+            {"axis": "data", "severity": "none", "evidence": "Listdir showed nothing"})}}]}
+
+    judge_agent._post, real = fake_post, judge_agent._post
+    try:
+        out = judge_agent.judge_axis("data", "T0", "T1", "T2", [], diffs=DIFFS, max_steps=6)
+    finally:
+        judge_agent._post = real
+
+    assert out["severity"] == "none", out.get("error")
+    nudge = [m for m in seen if "no tool call and no JSON object" in str(m.get("content"))]
+    assert len(nudge) == 1, "the stall was not nudged exactly once"
+
+
+def test_a_tool_with_no_data_says_to_stop_calling_it() -> None:
+    """A bare error read as "try another table": one axis called GetRuntime thirty times across ten
+    steps and never answered."""
+    got = judge_agent.Tools("T0", "T1", "T2", runtime={}).GetRuntime("processes")
+    assert "no host-monitor snapshots" in got["error"]
+    assert "Do not call it again" in got["unavailable"]
+    assert "say so" in got["unavailable"]
+
+
 def test_cross_check_calls_a_collection_failure_what_it_is(tmp_path: Path) -> None:
     """A recording that contradicts its own audit is not a result about ICE.
 
