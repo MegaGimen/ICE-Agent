@@ -80,6 +80,14 @@ def _force_escalate() -> bool:
 
 def evaluate(entry: ChangeEntry) -> GateResult:
     res = GateResult(entry=entry)
+    # Dataset recording: the decision model is not consulted at all. It used to be called and then
+    # overridden, which spent a model call per change on an answer that could not affect anything,
+    # and made every episode depend on a relay that has gone down mid-run. A recording is of the
+    # agent, and nothing here is a recording of this model.
+    if _force_escalate():
+        res.escalate, res.priority = True, "low"
+        res.reasons.append("forced escalation (recording; the decision model is not consulted)")
+        return res
     try:
         answers = judge_batch(build_state(entry), _queries())
     except Exception as e:  # noqa: BLE001 — Kev down must not drop the signal
@@ -100,12 +108,6 @@ def evaluate(entry: ChangeEntry) -> GateResult:
         res.reasons.append(f"verdict={res.verdict}")
     res.escalate = bool(res.reasons)
     res.priority = "high" if res.verdict != "normal" else ("low" if res.escalate else "none")
-    # Dataset recording (ICE_FORCE_ESCALATE=1): every change must reach investigation so each episode
-    # yields a trajectory. Kev still runs and its attributes/verdict are recorded above as data — it
-    # just no longer vetoes. Without this a low-scoring episode silently produces nothing to record.
-    if not res.escalate and _force_escalate():
-        res.escalate, res.priority = True, "low"
-        res.reasons.append("forced escalation (recording; Kev scored but did not veto)")
     return res
 
 

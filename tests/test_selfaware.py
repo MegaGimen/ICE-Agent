@@ -56,8 +56,13 @@ def test_gate_refuses_blocking_its_own_model() -> None:
                           critical_assets=selfaware.assets(), deny_critical_assets=True)
     gate = SafetyGate(policy)
 
+    # The address is taken from what the configuration resolves to now, not written down. The
+    # incident's own IP was hardcoded here and the test passed only while DNS still returned it:
+    # api.ideastead.com moved, and this started failing on a change that had nothing to do with it.
+    resolved = [a for e in selfaware.endpoints() for a in (e.get("addresses") or [])]
+    assert resolved, "the configured endpoint resolved to nothing, so there is nothing to protect"
     suicide = gate.safety_gate(
-        {"command": "iptables -I OUTPUT -d 43.161.253.230 -j DROP", "target": "ice-target"},
+        {"command": f"iptables -I OUTPUT -d {resolved[0]} -j DROP", "target": "ice-target"},
         "block the C2 address")
     assert suicide.decision == "DENY", suicide
     assert "critical asset" in (suicide.reason or "").lower()

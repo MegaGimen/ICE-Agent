@@ -595,55 +595,6 @@ def _read_transcript(db_path: Path, session_id: str) -> Dict[str, Any]:
         db.close()
 
 
-def kev_score(scenario: Scenario, case: Dict[str, Any], trajectory: Dict[str, Any]) -> Dict[str, Any]:
-    """Kev's only job here: score the finished trajectory. It never gated the episode."""
-    tool_calls = []
-    for row in trajectory.get("transcript_events") or []:
-        msg = (row.get("event") or {}).get("message") or {}
-        for block in msg.get("content") or []:
-            if isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result"):
-                tool_calls.append({k: block.get(k) for k in ("type", "name") if block.get(k)})
-    state = json.dumps({
-        "ground_truth": {"scenario": scenario.display, "techniques": scenario.techniques,
-                         "artifacts": scenario.artifacts},
-        "ice_result": {"assessment": case.get("_ice", {}).get("assessment"),
-                       "attck": case.get("attck"), "blast_radius": case.get("blast_radius"),
-                       "confidence": case.get("confidence"),
-                       "reason": (case.get("reason") or "")[:4000]},
-        "agent_steps": len(trajectory.get("transcript_events") or []),
-        "agent_tool_calls": tool_calls[:60],
-    }, ensure_ascii=False)
-    questions = {
-        "verdict_correct": {"type": "noul",
-                            "instructions": "Did ICE reach the correct verdict for this attack "
-                                            "(malicious or uncertain, not benign)?"},
-        "techniques_correct": {"type": "noul",
-                               "instructions": "Does ICE's ATT&CK mapping include the ground-truth techniques?"},
-        "scope_complete": {"type": "noul",
-                           "instructions": "Did ICE's blast radius cover the ground-truth artifacts?"},
-        # This Kev build's /v1/systemone accepts only `noul` and `choice` (a `score` question is
-        # rejected with 422), so the quality rating is a choice over ordered levels.
-        "investigation_quality": {"type": "choice",
-                                  "instructions": "How well does the investigation trajectory support its "
-                                                  "conclusion?",
-                                  "criteria": {"very poor": "unsupported or incoherent",
-                                               "poor": "thin evidence",
-                                               "adequate": "enough evidence for the verdict",
-                                               "good": "clear evidence and reasoning",
-                                               "excellent": "thorough, well-evidenced reasoning"}},
-    }
-    body = json.dumps({"state": state, "model": KEV_MODEL, "questions": questions}).encode()
-    headers = {"Content-Type": "application/json"}
-    if KEV_API_KEY:
-        headers["Authorization"] = "Bearer " + KEV_API_KEY
-    req = urllib.request.Request(KEV_URL, data=body, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=180) as r:
-            return json.loads(r.read())
-    except Exception as e:  # noqa: BLE001 - a scoring outage must not lose the episode
-        return {"error": f"{type(e).__name__}: {e}"}
-
-
 def grade(scenario: Scenario, case: Optional[Dict[str, Any]],
           arm: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Deterministic grading (same rules as ice.exercise.drill).
@@ -1011,7 +962,10 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         except json.JSONDecodeError as e:
             trajectory = {"error": f"unreadable trajectory: {e}"}
     det = grade(scenario, case, arm)
-    kev = kev_score(scenario, case, trajectory) if case else {"skipped": "no case"}
+    # No decision-model score. It judged the episode against the scenario's declared ground truth,
+    # which is the thing the seven axes were built to stop needing, and it put a second model
+    # between the recording and the data for no reward anyone uses.
+    kev = {"removed": "the decision model is not consulted while recording"}
 
     # Both halves of the score, from the whole filesystem for files and from osquery only for state
     # that has no file behind it.
@@ -1046,7 +1000,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         # agent produced on its own. Empty for an ordinary recording.
         "probe": probe or {},
         "audit_counts": audit_counts(ep_dir / "ice-audit.jsonl"),
-        "kev_score": kev,
+        "decision_model": kev,
         # One reward, derived from two snapshots of this episode's own machine. The scenario-based
         # one that used to sit here is gone: it graded against declarations, and its deterministic
         # backstop grepped file *contents* for markers, so `persistevil` -- a filename -- never
