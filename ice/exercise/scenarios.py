@@ -29,6 +29,9 @@ class Scenario:
     variant: List[str] = field(default_factory=list)
     variant_cleanup: List[str] = field(default_factory=list)
     variant_facts: Dict[str, bool] = field(default_factory=dict)
+    # The variant reaches the same goal by another technique, so the substrings that find its case
+    # are its own -- the original's markers do not appear in it.
+    variant_markers: List[str] = field(default_factory=list)
     normal: List[str] = field(default_factory=list)
     normal_cleanup: List[str] = field(default_factory=list)
     normal_facts: Dict[str, bool] = field(default_factory=dict)
@@ -57,6 +60,7 @@ PERSISTENCE = Scenario(
     ],
     variant_cleanup=["systemctl disable art-persist.service", "rm -f /etc/systemd/system/art-persist.service"],
     variant_facts={"new_autostart_unit": True},
+    variant_markers=["art-persist"],
     normal=["apt-get install -y -q sl"],
     normal_cleanup=["apt-get remove -y -q sl"],
     normal_facts={"package_install": True},

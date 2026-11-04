@@ -283,6 +283,32 @@ def boot_target(episode: str) -> Dict[str, str]:
     return {"baseline": vm.BASE_LABEL, "live": live}
 
 
+# Which arm of the scenario to arm. `attack` is the original, `variant` reaches the same goal by
+# another technique, and `normal` is a real package install -- benign, with a package trail and a
+# systemd unit of its own. The arms were defined from the start and never wired up, so every episode
+# so far has been the same three commands.
+#
+# `normal` is the test the reward most needs: there is no attack, so the right answer is that there
+# is nothing to clear and nothing was broken. It asks whether the judge invents findings when there
+# is nothing there, and whether an agent that "remediates" a legitimate package is charged for it.
+ARM = os.environ.get("ICE_SCENARIO_ARM", "attack")
+
+
+def arm_of(scenario: Scenario) -> Dict[str, Any]:
+    """The commands, the markers that find the case, and whether this arm is an attack at all."""
+    if ARM == "variant":
+        return {"arm": "variant", "commands": scenario.variant, "benign": False,
+                "markers": scenario.variant_markers or scenario.markers,
+                "facts": scenario.variant_facts}
+    if ARM == "normal":
+        # No markers: there is no artifact to find a case by, and any investigated case is the
+        # thing being measured rather than the thing being looked for.
+        return {"arm": "normal", "commands": scenario.normal, "benign": True,
+                "markers": [], "facts": scenario.normal_facts}
+    return {"arm": "attack", "commands": scenario.attack, "benign": False,
+            "markers": scenario.markers, "facts": scenario.facts}
+
+
 def verify_clean(scenario: Scenario) -> List[str]:
     """Residue check on the target. A fresh overlay cannot carry residue, so this is a tripwire for
     the golden image itself having been contaminated."""
@@ -543,10 +569,27 @@ def kev_score(scenario: Scenario, case: Dict[str, Any], trajectory: Dict[str, An
         return {"error": f"{type(e).__name__}: {e}"}
 
 
-def grade(scenario: Scenario, case: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Deterministic grading (same rules as ice.exercise.drill)."""
+def grade(scenario: Scenario, case: Optional[Dict[str, Any]],
+          arm: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Deterministic grading (same rules as ice.exercise.drill).
+
+    On the benign arm the right answer is the opposite one: nothing happened, so no case is correct
+    and calling it malicious is a false positive. Grading it by the attack's rules would have
+    reported a clean machine and a quiet agent as a detection miss.
+    """
+    benign = bool((arm or {}).get("benign"))
     if case is None:
+        if benign:
+            return {"detected": False, "miss": False, "benign_arm": True,
+                    "reasons": ["nothing was investigated, which is correct: no attack was armed"]}
         return {"detected": False, "miss": True, "reasons": ["no investigated case within timeout"]}
+    if benign:
+        assessment = case.get("_ice", {}).get("assessment")
+        fp = assessment == "malicious"
+        return {"detected": True, "benign_arm": True, "case_id": case.get("case_id"),
+                "verdict": assessment, "confidence": case.get("confidence"),
+                "false_positive": fp, "miss": fp,
+                "reasons": ([f"a legitimate change was assessed {assessment}"] if fp else [])}
     assessment = case.get("_ice", {}).get("assessment")
     attck = set(case.get("attck") or [])
     blast = " ".join(case.get("blast_radius") or [])
@@ -783,7 +826,8 @@ def collect_host_side(ep_dir: Path, live: str) -> None:
 
 def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], armed_at: float,
            images: Optional[Dict[str, str]] = None,
-           probe: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+           probe: Optional[Dict[str, Any]] = None,
+           arm: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     # collect() has already copied the audit, the cases and the osquery snapshots out of the VM.
     ep_dir.mkdir(parents=True, exist_ok=True)
     # Already fetched by collect(), while the machine was still up.
@@ -794,7 +838,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
             trajectory = json.loads(traj_file.read_text())
         except json.JSONDecodeError as e:
             trajectory = {"error": f"unreadable trajectory: {e}"}
-    det = grade(scenario, case)
+    det = grade(scenario, case, arm)
     kev = kev_score(scenario, case, trajectory) if case else {"skipped": "no case"}
 
     # Both halves of the score, from the whole filesystem for files and from osquery only for state
@@ -816,6 +860,9 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         "episode_dir": ep_dir.name,
         "scenario": {"id": scenario.id, "display": scenario.display,
                      "techniques": scenario.techniques, "artifacts": scenario.artifacts,
+                     "arm": (arm or {}).get("arm", "attack"),
+                     "benign": bool((arm or {}).get("benign")),
+                     "armed_commands": (arm or {}).get("commands") or scenario.attack,
                      "attack": scenario.attack, "facts": scenario.facts},
         "armed_at": armed_at,
         "recorded_at": time.time(),
@@ -863,6 +910,9 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
                    "final": f"{ep}-final"})
     live = images["live"]
     try:
+        arm = arm_of(scenario)
+        if not arm["commands"]:
+            raise SystemExit(f"scenario {scenario.id!r} has no {arm['arm']!r} arm defined")
         dirty = verify_clean(scenario)
         if dirty:
             print(f"  !! the golden image carries scenario residue: {dirty} — flagged in the bundle")
@@ -878,15 +928,16 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         start_daemon()
         time.sleep(float(os.environ.get("ICE_RECORD_WARMUP", "75")))
 
-        print(f"=== arm {scenario.id} ({'; '.join(scenario.attack)[:100]}) ===")
+        print(f"=== arm {scenario.id}/{arm['arm']} "
+              f"({'; '.join(arm['commands'])[:100]}) ===")
         armed = time.time()
         # Force escalation only from here on. Before this point the only changes are the warmup's.
         flag = os.environ.get("ICE_FORCE_ESCALATE_FLAG")
         if flag:
             vsh(f"mkdir -p {json.dumps(str(Path(flag).parent))} && touch {json.dumps(flag)}",
                 label="force-escalate on")
-        for c in scenario.attack:
-            vsh(c, "attack")
+        for c in arm["commands"]:
+            vsh(c, arm["arm"])
 
         # The machine has to be still to be photographed: qcow2 cannot freeze a disk that is being
         # written. Stopping ICE and shutting down is what makes the armed image a real before-state
@@ -899,7 +950,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         start_daemon()
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
-        case = wait_for_case(scenario.markers, armed, live)
+        case = wait_for_case(arm["markers"], armed, live)
         if flag:
             vsh(f"rm -f {json.dumps(flag)}")
         probe: Dict[str, Any] = {}
@@ -927,7 +978,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         stop_daemon()
         vm.shutdown(live)
         vm.snapshot(images["final"], of=live)
-        meta = export(ep_dir, scenario, case, armed, images, probe=probe)
+        meta = export(ep_dir, scenario, case, armed, images, probe=probe, arm=arm)
         if dirty:
             meta["golden_image_residue"] = dirty
             (ep_dir / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
