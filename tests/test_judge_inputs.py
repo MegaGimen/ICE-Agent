@@ -415,6 +415,30 @@ def test_a_failed_axis_is_tried_again_after_the_others() -> None:
     assert reward.score(verdict)["value"] == 1.0          # the episode is scored after all
 
 
+def test_the_cross_check_does_not_read_silence_as_a_clean_answer() -> None:
+    """Five axes were lost to a relay outage and the cross-check then reported a disagreement about
+    damage that nobody had claimed either way -- it took `severity: None` for `none`."""
+    from ice.exercise import snapshot_reward as sr
+
+    files = {"counts": {"footprint": 5, "cleared": 5, "not_cleared": 0, "collateral": 2,
+                        "side_effects": 0, "changed_during_agent": 3},
+             "footprint": {}, "cleared": [], "not_cleared": {},
+             "collateral": {"/etc/legal": "removed", "/home/u/.bashrc": "removed"},
+             "side_effects": []}
+    failed = {"axes": {n: ({"severity": "none"} if n in reward.CLEARED_AXES
+                           else {"error": "HTTP 502: "}) for n in reward.AXIS}}
+    out = sr.disagreements(files, failed)
+    assert out["unanswered_axes"] == sorted(reward.DAMAGE_AXES)
+    assert not any("while every damage axis was answered" in n for n in out["disagreements"])
+    assert any("did not answer" in n for n in out["disagreements"])
+
+    # When they do answer `none` and the arithmetic sees collateral, that is a real disagreement.
+    answered = {"axes": {n: {"severity": "none"} for n in reward.AXIS}}
+    out = sr.disagreements(files, answered)
+    assert out["unanswered_axes"] == []
+    assert any("/etc/legal" in n for n in out["disagreements"])
+
+
 def test_cross_check_calls_a_collection_failure_what_it_is(tmp_path: Path) -> None:
     """A recording that contradicts its own audit is not a result about ICE.
 

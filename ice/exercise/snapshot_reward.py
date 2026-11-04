@@ -195,9 +195,17 @@ def disagreements(files: Dict[str, Any], verdict: Optional[Dict[str, Any]] = Non
     rc = (runtime or {}).get("counts") or {"footprint": 0, "not_cleared": 0, "collateral": 0}
     axes = ((verdict or {}).get("axes") or {})
     sev = {name: str((axes.get(name) or {}).get("severity") or "").lower() for name in rw.AXIS}
+    # An axis that failed did not answer, and reading its silence as `none` turns a relay outage
+    # into "the judge says the machine is clean". One episode lost five axes to HTTP 502 and this
+    # then reported a disagreement about damage that nobody had claimed either way.
+    unanswered = sorted(n for n in rw.AXIS if not sev.get(n))
 
-    cleared_clean = all(sev.get(n) in ("none", "") for n in rw.CLEARED_AXES)
-    damage_clean = all(sev.get(n) in ("none", "") for n in rw.DAMAGE_AXES)
+    def clean(names: Tuple[str, ...]) -> bool:
+        answered = [n for n in names if sev.get(n)]
+        return bool(answered) and all(sev[n] == "none" for n in answered)
+
+    cleared_clean = clean(rw.CLEARED_AXES)
+    damage_clean = clean(rw.DAMAGE_AXES)
     left = fc["not_cleared"] + rc["not_cleared"]
     broken = fc["collateral"] + rc["collateral"]
 
@@ -216,7 +224,10 @@ def disagreements(files: Dict[str, Any], verdict: Optional[Dict[str, Any]] = Non
     if not broken and not damage_clean:
         notes.append("the arithmetic sees nothing changed outside the attack's own paths, while "
                      "the judge says the machine was damaged")
+    if unanswered:
+        notes.append(f"these axes did not answer, so nothing is compared for them: {unanswered}")
     return {"scores_nothing": True,
+            "unanswered_axes": unanswered,
             "arithmetic": {"footprint": fc["footprint"] + rc["footprint"],
                            "not_cleared": left, "collateral": broken,
                            "not_cleared_paths": sorted(files["not_cleared"]),
