@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 VM_DIR = Path(os.environ.get("ICE_VM_DIR", "/root/ice-vm"))
 BASE = VM_DIR / "base.qcow2"
@@ -124,12 +124,94 @@ def _run(cmd: List[str], label: str = "", check: bool = True,
 # ------------------------------------------------------------------ overlays
 
 BASE_LABEL = "base"
+DISK_ID = "disk0"          # so QMP can name the disk when snapshotting a running VM
 
 
 def overlay_path(label: str) -> Path:
     """The disk behind a label. The golden image answers to "base" so it can be diffed against
-    like any snapshot -- it is the healthy machine, which is one side of every comparison."""
-    return BASE if label == BASE_LABEL else OVERLAYS / f"{label}.qcow2"
+    like any snapshot -- it is the healthy machine, which is one side of every comparison.
+
+    A label usually names its own file, but not after a live snapshot. Taking one from a running VM
+    inverts the chain: qemu starts writing to a *new* overlay and the file it was writing to becomes
+    the frozen one, and it cannot be renamed while qemu holds it open. So the snapshot's sidecar
+    records which file it actually is, and that wins over the name.
+    """
+    if label == BASE_LABEL:
+        return BASE
+    meta = OVERLAYS / f"{label}.meta.json"
+    try:
+        got = json.loads(meta.read_text()).get("path")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        got = None
+    return Path(got) if got else OVERLAYS / f"{label}.qcow2"
+
+
+def qmp_socket(label: str) -> Path:
+    return VM_DIR / f"{label}.qmp"
+
+
+def _qmp(label: str, command: str, **args: Any) -> Dict[str, Any]:
+    """One QMP command to a running VM. This is how a snapshot is taken without stopping it."""
+    import socket as _socket
+    sock = qmp_socket(label)
+    if not sock.exists():
+        raise RuntimeError(f"{label} has no QMP socket at {sock}; it was booted without one")
+    with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as c:
+        c.settimeout(30)
+        c.connect(str(sock))
+        f = c.makefile("rwb")
+        f.readline()                                    # the greeting
+        for payload in ({"execute": "qmp_capabilities"}, {"execute": command, "arguments": args}):
+            f.write(json.dumps(payload).encode() + b"\n")
+            f.flush()
+            while True:
+                line = f.readline()
+                if not line:
+                    raise RuntimeError(f"QMP closed while running {command}")
+                reply = json.loads(line)
+                if "event" in reply:                    # events interleave with replies
+                    continue
+                if "error" in reply:
+                    raise RuntimeError(f"QMP {command} failed: {reply['error']}")
+                break
+        return reply
+
+
+def snapshot_live(label: str, of: str) -> Path:
+    """Freeze a running VM's disk under a new label, without stopping it.
+
+    The old way shut the machine down, moved the overlay aside and booted again -- correct, and it
+    cost more than the 17 seconds. The reboot between the attack and the investigation destroyed the
+    attack's runtime state: a process it started, a socket it held, gone before the agent ever
+    looked. `execution` -- is the attack still running -- could then only ever be answered `none`,
+    not because the agent had cleaned anything but because the reboot had.
+
+    qemu does this itself: blockdev-snapshot-sync hands the guest a fresh overlay and leaves what it
+    was writing to as that overlay's read-only backing. The image is crash-consistent rather than
+    clean, which is what "the machine as it was at that instant" means; the audit and the trajectory
+    are collected over ssh and do not depend on it.
+    """
+    live = overlay_path(of)
+    if not live.exists():
+        raise RuntimeError(f"no overlay named {of!r}")
+    if not running(of):
+        raise RuntimeError(f"{of} is not running; use snapshot() for a stopped VM")
+    if (OVERLAYS / f"{label}.meta.json").exists():
+        raise RuntimeError(f"{label} already exists")
+    gen = 1
+    while (OVERLAYS / f"{of}.g{gen}.qcow2").exists():
+        gen += 1
+    fresh = OVERLAYS / f"{of}.g{gen}.qcow2"
+    _qmp(of, "blockdev-snapshot-sync", device=DISK_ID, **{"snapshot-file": str(fresh),
+                                                          "format": "qcow2"})
+    # The file qemu *was* writing to is now frozen: that is the snapshot, under its old name.
+    (OVERLAYS / f"{label}.meta.json").write_text(json.dumps(
+        {"label": label, "taken": time.time(), "of": of, "path": str(live), "live_snapshot": True,
+         "now_live": str(fresh)}, indent=1))
+    (OVERLAYS / f"{of}.meta.json").write_text(json.dumps(
+        {"label": of, "taken": time.time(), "path": str(fresh), "frozen_as": label}, indent=1))
+    print(f"  [snapshot-live {label}] {live.name} frozen, {of} now writing {fresh.name}")
+    return live
 
 
 def create_overlay(label: str, backing: Optional[Path] = None) -> Path:
@@ -325,11 +407,13 @@ def boot(label: str, wait: bool = True) -> None:
     _PORT[label] = port
     cmd = ["qemu-system-x86_64", "-enable-kvm", "-machine", "q35", "-cpu", "host",
            "-m", str(MEM_MB), "-smp", str(CPUS),
-           "-drive", f"file={img},if=virtio,cache=writeback",
+           "-drive", f"file={img},if=virtio,cache=writeback,id={DISK_ID}",
            "-drive", f"file={SEED},media=cdrom",
            "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{port}-:22",
            "-device", "virtio-net-pci,netdev=n0",
            "-display", "none", "-serial", f"file:{console}",
+           # A control socket, so a snapshot can be taken without shutting the machine down.
+           "-qmp", f"unix:{qmp_socket(label)},server=on,wait=off",
            "-daemonize", "-pidfile", str(pid_file(label))]
     _run(cmd, f"boot {label} (ssh :{port})")
     if wait:

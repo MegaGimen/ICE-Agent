@@ -596,11 +596,25 @@ class Orchestrator:
     def run_forever(self, stop: Optional[threading.Event] = None) -> None:
         stop = stop or threading.Event()
         interval = self.rt.conf.snapshot_interval_s
-        log.info("orchestrator started: interval %.0fs, warmup %d cycles", interval, self.rt.conf.warmup_cycles)
+        # Something outside can ask for a cycle now instead of waiting out the interval. The dataset
+        # recorder uses it: it knows the exact moment the attack finished, so there is no reason to
+        # spend up to a full interval waiting for the loop to come round and notice.
+        nudge = Path(os.environ.get("ICE_CYCLE_NOW_FLAG") or (self.rt.conf.state_dir / "CYCLE_NOW"))
+        log.info("orchestrator started: interval %.0fs, warmup %d cycles, cycle-now flag %s",
+                 interval, self.rt.conf.warmup_cycles, nudge)
         while not stop.is_set():
             t = time.time()
             try:
                 self.cycle()
             except Exception:  # noqa: BLE001 — one bad cycle must not stop monitoring
                 log.exception("cycle failed")
-            stop.wait(max(1.0, interval - (time.time() - t)))
+            deadline = t + max(1.0, interval)
+            while not stop.is_set() and time.time() < deadline:
+                try:
+                    if nudge.exists():
+                        nudge.unlink(missing_ok=True)
+                        log.info("cycle requested now (%s)", nudge)
+                        break
+                except OSError:
+                    pass
+                stop.wait(min(1.0, max(0.05, deadline - time.time())))

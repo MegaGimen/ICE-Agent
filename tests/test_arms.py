@@ -197,6 +197,53 @@ def test_an_unscored_episode_keeps_its_disks() -> None:
             record.DATASET = real
 
 
+def test_the_armed_snapshot_does_not_stop_the_machine() -> None:
+    """Shutting down for T1 cost more than the 17 seconds: the reboot between the attack and the
+    investigation destroyed the attack's runtime state, so a process it started or a socket it held
+    was gone before the agent ever looked. `execution` could then only be answered `none`, and not
+    because the agent had cleaned anything."""
+    import inspect
+
+    from ice.exercise import record, vm
+
+    run = inspect.getsource(record.run_episode)
+    # T1 is taken live, and nothing is shut down between the attack and the investigation.
+    assert "vm.snapshot_live(images[\"armed\"]" in run
+    armed = run.index("snapshot_live(images[\"armed\"]")
+    case = run.index("wait_for_case(")
+    assert "vm.shutdown" not in run[armed:case], "the machine is still being stopped for T1"
+    # And the daemon is woken at once rather than waited for.
+    assert "CYCLE_NOW" in run[armed:case]
+
+    # The live snapshot asks qemu to do it, and records which file the frozen one actually is --
+    # qemu keeps writing to a new overlay and cannot rename the old one while it holds it open.
+    src = inspect.getsource(vm.snapshot_live)
+    assert "blockdev-snapshot-sync" in src and "device=DISK_ID" in src
+    assert "id={DISK_ID}" in inspect.getsource(vm.boot)  # the disk is named so QMP can address it
+    assert '"path": str(live)' in src
+    assert "running(of)" in src                       # refuses on a stopped VM, where it is wrong
+    assert "-qmp" in inspect.getsource(vm.boot)
+
+
+def test_a_label_can_point_at_a_file_that_is_not_named_after_it() -> None:
+    """After a live snapshot the frozen file keeps the live disk's name, so the label's sidecar is
+    what says which file it is."""
+    import tempfile
+
+    from ice.exercise import vm
+
+    with tempfile.TemporaryDirectory() as d:
+        vm.OVERLAYS, real = Path(d), vm.OVERLAYS
+        try:
+            assert vm.overlay_path("plain") == Path(d) / "plain.qcow2"
+            (Path(d) / "armed.meta.json").write_text(json.dumps({"path": f"{d}/ep-live.qcow2"}))
+            assert vm.overlay_path("armed") == Path(f"{d}/ep-live.qcow2")
+            (Path(d) / "broken.meta.json").write_text("not json")
+            assert vm.overlay_path("broken") == Path(d) / "broken.qcow2"
+        finally:
+            vm.OVERLAYS = real
+
+
 if __name__ == "__main__":
     test_each_arm_brings_its_own_commands_and_its_own_markers()
     test_the_benign_arm_inverts_what_correct_means()

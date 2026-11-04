@@ -1073,15 +1073,16 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         for c in arm["commands"]:
             vsh(c, arm["arm"])
 
-        # The machine has to be still to be photographed: qcow2 cannot freeze a disk that is being
-        # written. Stopping ICE and shutting down is what makes the armed image a real before-state
-        # rather than a smear, and booting again costs about 17 seconds.
-        print("  snapshotting the armed machine")
-        stop_daemon()
-        vm.shutdown(live)
-        vm.snapshot(images["armed"], of=live)
-        vm.boot(live)
-        start_daemon()
+        # T1 is taken from the running machine. Shutting down for it cost more than the 17 seconds:
+        # the reboot between the attack and the investigation destroyed the attack's runtime state,
+        # so a process it started or a socket it held was gone before the agent ever looked, and
+        # `execution` -- is the attack still running -- could only ever be answered `none`, not
+        # because the agent had cleaned anything but because the reboot had.
+        print("  snapshotting the armed machine without stopping it")
+        vm.snapshot_live(images["armed"], of=live)
+        # And the recorder knows the exact moment the attack finished, so there is no reason to wait
+        # out a perception interval for the daemon to come round and notice.
+        vsh(f"touch {json.dumps(str(STATE / 'CYCLE_NOW'))}", label="wake the daemon now")
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
         case = wait_for_case(arm["markers"], armed, live)
