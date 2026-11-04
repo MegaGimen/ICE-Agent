@@ -578,9 +578,9 @@ def main() -> None:
     runtime = None
     if bundle:
         from ice.exercise import record
-        cases = sorted(bundle.glob("case-*.json"))
-        case = json.loads(cases[0].read_text()) if cases else {}
-        runtime = record._osquery_snapshots(bundle, case)
+        # The snapshots are read from the bundle by their own order, not from a case's pointers:
+        # a benign episode has no case at all, and the pointers were wrong once besides.
+        runtime = record._osquery_snapshots(bundle)
     try:
         verdict = judge(a.t0, a.t1, a.t2, commands, refused, runtime=runtime, axes=tuple(a.axis),
                         hash_check=a.hash_check, verbose=not a.quiet)

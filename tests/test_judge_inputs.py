@@ -335,6 +335,20 @@ def test_a_tool_with_no_data_says_to_stop_calling_it() -> None:
     assert "say so" in got["unavailable"]
 
 
+def test_the_cli_loads_a_bundle_the_way_the_recorder_does() -> None:
+    """The two call the same loader, and when its signature changed only one of them was updated --
+    so re-judging a bundle by hand died on a TypeError after the model had already been paid for
+    three axes. Cheap to assert, and it is the only caller outside the recorder."""
+    import inspect
+
+    from ice.exercise import record
+
+    sig = inspect.signature(record._osquery_snapshots)
+    assert list(sig.parameters) == ["ep_dir"], sig
+    src = inspect.getsource(judge_agent.main)
+    assert "record._osquery_snapshots(bundle)" in src
+
+
 def test_cross_check_calls_a_collection_failure_what_it_is(tmp_path: Path) -> None:
     """A recording that contradicts its own audit is not a result about ICE.
 
