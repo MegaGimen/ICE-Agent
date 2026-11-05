@@ -307,6 +307,12 @@ def test_the_daemon_unit_will_actually_start_at_boot() -> None:
     assert 'test -L /etc/systemd/system/multi-user.target.wants/ice-daemon.service' in src
     assert 'vsh("systemctl is-enabled' not in src
 
+    # And the episode checks the product actually came up, rather than installing it again.
+    boot = inspect.getsource(record.boot_target)
+    assert "is-active ice-daemon.service" in boot
+    for prepared in ("push_posture()", "sync_repo()", "install_daemon_unit()", "ICE_RECORD_WARMUP"):
+        assert prepared not in boot, f"{prepared} is still done inside the episode"
+
 
 if __name__ == "__main__":
     test_each_arm_brings_its_own_commands_and_its_own_markers()

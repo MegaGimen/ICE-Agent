@@ -434,13 +434,14 @@ def boot_target(episode: str) -> Dict[str, str]:
     vm.drop(live)
     vm.create_overlay(live)
     vm.boot(live)
-    print(f"  posture pushed: {len(push_posture())} variables")
-    sync_repo()
-    install_daemon_unit()   # idempotent; the golden image already carries it, so it costs no diff
-    start_daemon()
-    warm = float(os.environ.get("ICE_RECORD_WARMUP", "75"))
-    print(f"  waiting {warm:.0f}s for the T0 baseline of the clean machine")
-    time.sleep(warm)
+    # Nothing is installed, pushed or synced here: the image carries it all and T0 is the image, so
+    # anything done now would be a change against the baseline that the attack gets charged with.
+    # There is no warmup either -- it existed to let the perception loop build its own reference,
+    # and the recorder takes its own readings instead.
+    if vsh("systemctl is-active ice-daemon.service", timeout=60).stdout.strip() != "active":
+        raise RuntimeError("the daemon did not come up with the machine; re-run "
+                           "`record.py prepare` to put it in the image")
+    print("  the daemon came up with the machine")
     return {"baseline": vm.BASE_LABEL, "live": live}
 
 
