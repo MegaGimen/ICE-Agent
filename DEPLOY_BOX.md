@@ -1,5 +1,12 @@
 # ICE deployment — RTX PRO 6000 Blackwell box (Clore n1.de, sm_120, 96GB)
 
+> **This is not the machine recording runs on.** Dataset recording happens on the Salad box,
+> `root@220.86.159.73:21530` (the address the tooling uses: see `ice/exercise/sync_bundles.sh` and
+> `ice/exercise/push_repo.sh`). The Clore instance below was rented for the local models; its SSH
+> host keys no longer match, and port 2534 on that node may belong to someone else now, so do not
+> connect to it on the strength of this file. Everything below describes that machine, not the
+> recording rig.
+
 Deployed 2026-11-03. This box differs from the GB10 plan: **96GB dedicated VRAM**
 (not 120GB unified), compute cap **sm_120**, driver 595.84/CUDA 13.2, Ubuntu 20.04
 **Docker container (no systemd)**, 188GB RAM, 2.1TB disk.
