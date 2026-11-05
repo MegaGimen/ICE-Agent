@@ -206,6 +206,7 @@ def prepare_image() -> None:
         pushed = push_posture()
         install_daemon_unit()
         sync_repo()
+        ensure_mcp_token()
         vsh(f"mkdir -p {json.dumps(str(STATE))} && systemctl enable ice-daemon.service",
             label="enable the daemon at boot", check=True)
         # The link, not `is-enabled`: a unit with no [Install] section reports `static` rather than
@@ -283,6 +284,49 @@ def hand_over_case(t0: Optional[Dict[str, Any]], t1: Dict[str, Any]) -> int:
         label=f"hand over {len(entries)} change(s)", check=True, timeout=120)
     print(f"  [hand-over] {len(entries)} change(s) from the recorder's own two readings")
     return len(entries)
+
+
+def ensure_mcp_token() -> None:
+    """Make sure the daemon and the agent inside the image hold the same MCP bearer token.
+
+    The daemon reads `deploy/local-secrets/mcp.token`; the agent sends a literal `Authorization`
+    header out of its own config in the image. Nothing kept the two in step, and the file is
+    gitignored, so it only existed on whichever machine happened to have run the deploy script --
+    an image prepared anywhere else came up without it and the daemon exited 1 before taking its
+    first breath.
+
+    So: take the value from whatever the agent is already configured to send; only if there is no
+    config at all, mint one and write it to both. The value is read and written inside the VM and
+    never passes through the host.
+    """
+    script = (
+        "set -e\n"
+        "python3 - <<'ICETOKEN'\n"
+        "import json, os, secrets\n"
+        "tok_path = '/root/ICE/deploy/local-secrets/mcp.token'\n"
+        "cfg_path = os.path.expanduser('~/.openclaw/openclaw.json')\n"
+        "cfg = json.load(open(cfg_path)) if os.path.exists(cfg_path) else {}\n"
+        "srv = (((cfg.get('mcp') or {}).get('servers') or {}).get('ice-host') or {})\n"
+        "hdr = (srv.get('headers') or {}).get('Authorization') or ''\n"
+        "tok = hdr.split(None, 1)[1].strip() if hdr.lower().startswith('bearer ') else hdr.strip()\n"
+        "src = 'the agent config'\n"
+        "if not tok:\n"
+        "    tok, src = secrets.token_urlsafe(32), 'a fresh one'\n"
+        "    srv.setdefault('headers', {})['Authorization'] = 'Bearer ' + tok\n"
+        "    cfg.setdefault('mcp', {}).setdefault('servers', {})['ice-host'] = srv\n"
+        "    if os.path.exists(cfg_path):\n"
+        "        json.dump(cfg, open(cfg_path, 'w'), indent=1)\n"
+        "os.makedirs(os.path.dirname(tok_path), mode=0o700, exist_ok=True)\n"
+        "old = open(tok_path).read().strip() if os.path.exists(tok_path) else ''\n"
+        "if old != tok:\n"
+        "    os.umask(0o077)\n"
+        "    open(tok_path, 'w').write(tok + chr(10))\n"
+        "    os.chmod(tok_path, 0o600)\n"
+        "print('mcp token: %d bytes from %s, %s' % (len(tok), src,\n"
+        "      'written' if old != tok else 'already matched'))\n"
+        "ICETOKEN\n")
+    p_ = vsh(script, label="mcp token", check=True, timeout=60)
+    print(f"  [mcp token] {(p_.stdout or '').strip().splitlines()[-1] if p_.stdout else 'ok'}")
 
 
 def _mcp_port() -> int:
@@ -377,6 +421,12 @@ def sync_repo() -> None:
     # silent impostor once before.
     port = vm.ssh_port(vm.live_label() if hasattr(vm, "live_label") else "")
     rsync = ["rsync", "-a", "--delete",
+             # local-secrets is gitignored and machine-local: the daemon's MCP bearer token lives
+             # there and the agent's config in the image carries the same value. A --delete sync
+             # from a host that does not have it takes it out of the image, and then the daemon
+             # exits 1 at boot on FileNotFoundError and the episode dies at "the daemon did not
+             # come up with the machine".
+             "--exclude", "deploy/local-secrets",
              "--exclude", "__pycache__", "--exclude", ".git", "--exclude", "*.pyc",
              "-e", f"ssh -i {vm.KEY} -p {port} " + " ".join(vm._SSH_OPTS),
              str(REPO) + "/", "root@127.0.0.1:/root/ICE/"]
