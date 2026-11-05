@@ -22,6 +22,7 @@ export ICE_DRY_RUN=0            # execute for real
 # landed in the recording's own file diff as changes nobody made. Measuring detection needs its own
 # episodes with this off.
 export ICE_NO_PERCEPTION=1
+echo ">>> perception off; the decision model above is NOT consulted during a recording"
 
 # No safety gate while recording. A deployment has one; a recording of what the agent would do must
 # not, or the trajectory is of something else. One episode chose `rm -f /root/.ssh/authorized_keys`,

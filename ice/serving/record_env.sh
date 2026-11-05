@@ -15,10 +15,10 @@ export ICE_AUTO_APPROVE=1       # no human in the loop
 export ICE_DRY_RUN=0            # execute for real (overrides env.box.sh)
 
 export ICE_STATE_DIR="${ICE_STATE_DIR:-/root/ice-state}"
-# Force every change to investigation, but ONLY while the recorder has armed an attack. Forcing for
-# the whole run would spend each episode investigating reset/warmup noise, and OpenClaw serialises
-# agent runs, so the real attack would queue behind it.
-export ICE_FORCE_ESCALATE_FLAG="$ICE_STATE_DIR/FORCE_ESCALATE"
+# Every change reaches investigation and no decision model is consulted. The flag file this used to
+# key off existed for a pre-attack warmup that no longer happens: T0 is the image, ready, and the
+# attack is the first thing that touches the machine, so there is no reset noise to protect against.
+export ICE_FORCE_ESCALATE=1
 
 # Deterministic floor, deliberately kept: static policy, not Kev's judgement and not a human gate.
 # Without it an episode can delete this rig's SSH key or models and end the whole data collection.
@@ -37,5 +37,5 @@ export ICE_RECORD_SETTLE="${ICE_RECORD_SETTLE:-60}"    # seconds to let remediat
 
 echo ">>> recording posture: RECORD_MODE=$ICE_RECORD_MODE AUTO_APPROVE=$ICE_AUTO_APPROVE" \
      "DRY_RUN=$ICE_DRY_RUN DENY_CRITICAL=$ICE_DENY_CRITICAL_ASSETS"
-echo ">>> force-escalate only while armed, via flag: $ICE_FORCE_ESCALATE_FLAG"
+echo ">>> force-escalate: every change is investigated; no decision model is consulted"
 echo ">>> dataset: $ICE_DATASET_DIR   state: $ICE_STATE_DIR   baseline: $ICE_RIG_DIR"

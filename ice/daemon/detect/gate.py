@@ -67,15 +67,17 @@ def _queries() -> Dict[str, JudgeQuery]:
 def _force_escalate() -> bool:
     """Dataset recording: send every change to investigation so an episode always has a trajectory.
 
-    `ICE_FORCE_ESCALATE=1` forces it for the whole process. `ICE_FORCE_ESCALATE_FLAG=<path>` forces it
-    only while that file exists, which is what the recorder uses: forcing during the pre-attack warmup
-    would spend the episode investigating reset noise (and OpenClaw serialises agent runs, so the real
-    attack would queue behind it).
+    `ICE_FORCE_ESCALATE=1` forces it for the whole process. `ICE_NO_PERCEPTION=1` -- the recording
+    posture, where the recorder takes the readings and hands the case over complete -- means the same
+    thing: there is no detection stage to measure here, so no decision model is consulted. It was
+    being called once per change for an answer that could not change the outcome, and its verdicts
+    were landing in the agent's prompt.
+
+    (`ICE_FORCE_ESCALATE_FLAG=<path>` used to force it only while a file existed, for a pre-attack
+    warmup that no longer happens: T0 is the image, ready, and the attack is the first thing that
+    touches the machine.)
     """
-    if os.environ.get("ICE_FORCE_ESCALATE") == "1":
-        return True
-    flag = os.environ.get("ICE_FORCE_ESCALATE_FLAG")
-    return bool(flag) and os.path.exists(flag)
+    return os.environ.get("ICE_FORCE_ESCALATE") == "1" or os.environ.get("ICE_NO_PERCEPTION") == "1"
 
 
 def evaluate(entry: ChangeEntry) -> GateResult:

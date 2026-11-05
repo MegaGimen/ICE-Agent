@@ -40,13 +40,14 @@ as `reset_residue` rather than silently ignored.
 | `ICE_RECORD_MODE` | 1 | Kev is **not** a safety-gate veto: `runtime.py` builds the gate with no score provider, so its score-based DENYs ("lacks a legitimate basis", "effects exceed the stated scope") cannot truncate a trajectory. Kev scores the finished episode instead. |
 | `ICE_AUTO_APPROVE` | 1 | no human in the loop |
 | `ICE_DRY_RUN` | 0 | execute for real |
-| `ICE_FORCE_ESCALATE_FLAG` | `$ICE_STATE_DIR/FORCE_ESCALATE` | every change reaches investigation, but **only while the recorder has armed an attack** |
+| `ICE_FORCE_ESCALATE` | 1 | every change reaches investigation and **no decision model is consulted**. `ICE_NO_PERCEPTION=1` implies it too |
 | `ICE_DENY_CRITICAL_ASSETS` | 1 | deterministic floor, see below |
 
-**Why the flag file and not `ICE_FORCE_ESCALATE=1`:** forcing for the whole run spends each episode
-investigating reset/warmup noise. OpenClaw serialises agent runs (a second one fails with "Another
-OpenClaw process is using your data"), so the real attack would queue behind the noise. The recorder
-touches the flag immediately before arming and removes it once the case is found.
+**Why no flag file any more:** the flag existed so forcing would not start until the attack was
+armed, because forcing through a reset/warmup spent the episode investigating noise (and OpenClaw
+serialises agent runs, so the real attack queued behind it). T0 is now the image in a ready state and
+the attack is the first thing that touches the machine, so there is no warmup to protect against. A
+recording is of the agent: the decision model is not called once.
 
 **Why the critical-asset floor stays on:** it is static policy, not Kev's judgement and not a human
 gate. Without it an episode can delete this rig's own SSH key (the agent has proposed
