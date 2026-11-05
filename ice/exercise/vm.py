@@ -309,6 +309,14 @@ def _free_nbd() -> str:
     raise RuntimeError("no free /dev/nbdN; run `modprobe nbd max_part=8`")
 
 
+def _is_live_snapshot(label: str) -> bool:
+    """Was this snapshot taken while the machine was running? Its sidecar says so."""
+    try:
+        return bool(json.loads((OVERLAYS / f"{label}.meta.json").read_text()).get("live_snapshot"))
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return False
+
+
 def mount(label: str) -> Path:
     """Mount a snapshot read-only on the host and return its root.
 
@@ -320,9 +328,21 @@ def mount(label: str) -> Path:
     img = overlay_path(label)
     if not img.exists():
         raise RuntimeError(f"no snapshot named {label!r}")
+    # A snapshot taken from a running machine is crash-consistent: its ext4 journal was never
+    # replayed, so some inodes are mid-transaction and reading one fails with EUCLEAN (errno 117).
+    # One such file -- a .pyc under __pycache__ -- killed an episode's scoring outright. The journal
+    # is replayed into a scratch overlay instead, so the mount is consistent and the snapshot itself
+    # is still never written to.
+    live = _is_live_snapshot(label)
+    if live:
+        scratch = OVERLAYS / f"{label}.replay.qcow2"
+        scratch.unlink(missing_ok=True)
+        _run(["qemu-img", "create", "-q", "-f", "qcow2", "-b", str(img), "-F", "qcow2",
+              str(scratch)])
+        img = scratch
     subprocess.run(["modprobe", "nbd", "max_part=8"], capture_output=True)
     dev = _free_nbd()
-    _run(["qemu-nbd", "--read-only", "--connect", dev, str(img)])
+    _run(["qemu-nbd", *([] if live else ["--read-only"]), "--connect", dev, str(img)])
     root = MOUNTS / label
     root.mkdir(parents=True, exist_ok=True)
     part = f"{dev}p1"
@@ -331,9 +351,17 @@ def mount(label: str) -> Path:
             break
         time.sleep(0.25)
     target = part if Path(part).exists() else dev
-    p = subprocess.run(["mount", "-o", "ro,noload", target, str(root)], capture_output=True, text=True)
-    if p.returncode != 0:                    # noload is ext4-only; fall back for other filesystems
-        p = subprocess.run(["mount", "-o", "ro", target, str(root)], capture_output=True, text=True)
+    if live:
+        # Read-write once, so the journal replays into the scratch overlay, then back to read-only.
+        p = subprocess.run(["mount", target, str(root)], capture_output=True, text=True)
+        if p.returncode == 0:
+            subprocess.run(["mount", "-o", "remount,ro", str(root)], capture_output=True)
+    else:
+        p = subprocess.run(["mount", "-o", "ro,noload", target, str(root)],
+                           capture_output=True, text=True)
+        if p.returncode != 0:                # noload is ext4-only; fall back for other filesystems
+            p = subprocess.run(["mount", "-o", "ro", target, str(root)],
+                               capture_output=True, text=True)
     if p.returncode != 0:
         subprocess.run(["qemu-nbd", "--disconnect", dev], capture_output=True)
         raise RuntimeError(f"mount {target} failed: {p.stderr.strip()[:200]}")
@@ -341,11 +369,17 @@ def mount(label: str) -> Path:
     return root
 
 
+def _drop_replay(label: str) -> None:
+    """Remove the scratch overlay a live snapshot's journal was replayed into."""
+    (OVERLAYS / f"{label}.replay.qcow2").unlink(missing_ok=True)
+
+
 def umount(label: str) -> None:
     dev = _NBD_IN_USE.pop(label, None) or mounted().get(label, "").rstrip("p1") or None
     subprocess.run(["umount", str(MOUNTS / label)], capture_output=True)
     if dev:
         subprocess.run(["qemu-nbd", "--disconnect", dev], capture_output=True)
+    _drop_replay(label)
 
 
 def mounted() -> Dict[str, str]:

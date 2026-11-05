@@ -90,6 +90,10 @@ def index(label: str) -> Dict[str, Entry]:
             try:
                 st = os.lstat(fp)
             except OSError:
+                # Includes EUCLEAN on a snapshot taken from a running machine: an inode its journal
+                # never finished. Skipped rather than raised -- the entry is then simply not in this
+                # side's index, which reads as added or removed, and that is the honest answer about
+                # a path the filesystem will not describe.
                 continue
             if os.path.islink(fp):
                 kind, target = LINK, os.readlink(fp)
@@ -309,7 +313,24 @@ def show(a: str, b: str, path: str, context: int = 3, max_diff_bytes: int = 200_
     and sha256 and a diff that says it is binary, rather than the path being dropped as unavailable.
     """
     fa, fb = root(a) / path.lstrip("/"), root(b) / path.lstrip("/")
-    ea, eb = fa.exists() or fa.is_symlink(), fb.exists() or fb.is_symlink()
+
+    def present(fp: Path) -> Any:
+        """Is it there -- and if the filesystem cannot say, say that instead of raising.
+
+        A snapshot taken from a running machine can carry an inode its journal never finished
+        writing; reading one fails with EUCLEAN. The journal is replayed on mount now, but one
+        unreadable path must not take an episode's whole score with it.
+        """
+        try:
+            return fp.exists() or fp.is_symlink()
+        except OSError as e:
+            return e
+
+    ea, eb = present(fa), present(fb)
+    for side, got in ((a, ea), (b, eb)):
+        if isinstance(got, OSError):
+            return {"path": path, "status": "unreadable",
+                    "error": f"{side}: {type(got).__name__}: {got}"}
     out: Dict[str, Any] = {"path": path, f"in_{a}": ea, f"in_{b}": eb}
     if not ea and not eb:
         out["status"] = "absent from both"
