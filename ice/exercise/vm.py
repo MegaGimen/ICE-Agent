@@ -62,10 +62,18 @@ def _free_port(start: int = SSH_PORT) -> int:
 
 
 def ssh_port(label: str = "") -> int:
-    """The port this VM's ssh is forwarded to. Set when it boots."""
+    """The port this VM's ssh is forwarded to. Set when it boots.
+
+    With no label this used to answer with the *first* VM the process ever booted, because that is
+    what `next(iter(...))` means on a dict. In a run of several episodes every VM after the first one
+    was therefore probed on the previous episode's port -- a machine that had just been shut down --
+    so `wait_for_ssh` timed out on a VM that was up and answering, and only the first episode of a
+    batch was ever recorded. Unlabelled now means the newest, and `forget_port` drops a VM that is
+    gone so it can never be addressed again.
+    """
     if label and label in _PORT:
         return _PORT[label]
-    return next(iter(_PORT.values())) if _PORT else SSH_PORT
+    return next(reversed(_PORT.values())) if _PORT else SSH_PORT
 MEM_MB = int(os.environ.get("ICE_VM_MEM", "4096"))
 CPUS = int(os.environ.get("ICE_VM_CPUS", "4"))
 # 240s was not enough on a cold page cache: a 4 GiB image on a box that had just rebooted reached the login prompt and had sshd up, but after the wait had already given up -- and the episode was lost to a machine that was fine.
@@ -100,13 +108,18 @@ def _ssh_base(label: str = "") -> List[str]:
 
 
 def _current_label() -> str:
-    return next(iter(_PORT), "vm")
+    return next(reversed(_PORT), "vm") if _PORT else "vm"
+
+
+def forget_port(label: str) -> None:
+    """This VM is gone: stop letting "the VM" mean it."""
+    _PORT.pop(label, None)
 
 
 def live_label() -> str:
     """The episode's own VM, by name. Anything addressing "the VM" by a module default addresses
     whatever happens to be on port 2222, which has twice been a different machine."""
-    for label in _PORT:
+    for label in reversed(_PORT):
         if label.endswith("-live"):
             return label
     return _current_label()
@@ -266,6 +279,7 @@ def snapshot(label: str, of: str) -> Path:
 def drop(label: str) -> None:
     if label == BASE_LABEL:
         raise RuntimeError("refusing to delete the golden image")
+    forget_port(label)
     for p in (overlay_path(label), OVERLAYS / f"{label}.meta.json"):
         p.unlink(missing_ok=True)
 
@@ -466,14 +480,14 @@ def boot(label: str, wait: bool = True) -> None:
 
 def alive(label: str) -> bool:
     """Is this VM both running and answering ssh?"""
-    return running(label) and ssh(["true"], check=False,
+    return running(label) and ssh(["true"], check=False, label=label,
                                   timeout=PROBE_TIMEOUT).returncode == 0
 
 
 def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
     t0 = time.time()
     while time.time() - t0 < timeout:
-        if ssh(["true"], check=False, timeout=PROBE_TIMEOUT).returncode == 0:
+        if ssh(["true"], check=False, label=label, timeout=PROBE_TIMEOUT).returncode == 0:
             print(f"  [boot {label}] ssh up after {time.time() - t0:.0f}s")
             return
         if not running(label):
@@ -487,7 +501,7 @@ def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
 
 
 def ssh(argv: List[str], check: bool = True, timeout: Optional[float] = 300,
-        capture: bool = True) -> subprocess.CompletedProcess:
+        capture: bool = True, label: str = "") -> subprocess.CompletedProcess:
     """Run one command inside the VM, with argv arriving as argv.
 
     ssh does not preserve argument boundaries: it concatenates everything after the host into one
@@ -499,7 +513,7 @@ def ssh(argv: List[str], check: bool = True, timeout: Optional[float] = 300,
     "NO case" while ICE had detected and remediated the attack, and copied whatever `ls` had
     listed in /root into the bundle. shlex.join is what makes the remote shell rebuild this argv.
     """
-    cmd = ["ssh", *_ssh_base(), "root@127.0.0.1", shlex.join(argv)]
+    cmd = ["ssh", *_ssh_base(label), "root@127.0.0.1", shlex.join(argv)]
     p = subprocess.run(cmd, capture_output=capture, text=True, timeout=timeout)
     if check and p.returncode != 0:
         raise RuntimeError(f"ssh {argv[:2]} failed rc={p.returncode}: {p.stderr.strip()[:300]}")
@@ -553,7 +567,7 @@ def shutdown(label: str, timeout: float = 120) -> None:
     if not running(label):
         close_connection(label)
         return
-    ssh(["systemctl", "poweroff", "--no-block"], check=False, timeout=15)
+    ssh(["systemctl", "poweroff", "--no-block"], check=False, label=label, timeout=15)
     close_connection(label)
     t0 = time.time()
     while time.time() - t0 < timeout:
