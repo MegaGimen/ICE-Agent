@@ -226,6 +226,14 @@ def prepare_image() -> None:
     base.rename(keep)
     Path(str(base) + ".new").rename(base)
     vm.drop(live)
+    # One rollback copy, not one per prepare. Each is a flattened 4 GiB image and six of them filled
+    # the box's disk, so the next convert died at "No space left on device" with the golden image
+    # already renamed out of the way.
+    older = sorted(base.parent.glob(base.name + ".before-*"))[:-1]
+    for f in older:
+        size = f.stat().st_size // (1024 * 1024)
+        f.unlink()
+        print(f"  dropped the older rollback image {f.name} ({size} MiB)")
     print(f"  the golden image is now T0: ICE installed, enabled, and the code under test in it")
 
 
