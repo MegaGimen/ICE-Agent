@@ -42,6 +42,7 @@ import os
 import sqlite3
 import shutil
 import subprocess
+import traceback
 import time
 import urllib.request
 from pathlib import Path
@@ -1390,7 +1391,15 @@ def main() -> None:
     results = []
     for i in range(1, a.episodes + 1):
         print(f"\n########## episode {i}/{a.episodes} ##########")
-        results.append(run_episode(scenario, i))
+        try:
+            results.append(run_episode(scenario, i))
+        except Exception as e:                            # noqa: BLE001
+            # One episode's rig failure is not the batch's. A VM that took too long to answer ssh
+            # killed episodes 2 and 3 of a run of 3, and the machine turned out to be fine.
+            traceback.print_exc()
+            print(f"!! episode {i}/{a.episodes} failed: {type(e).__name__}: {e}; going on")
+            results.append({"aborted": f"{type(e).__name__}: {e}", "episode": i,
+                            "grade": {"miss": True}})
     lost = [m for m in results if m.get("aborted")]
     graded = [m for m in results if not m.get("aborted")]
     ok = sum(1 for m in graded if not m["grade"].get("miss"))

@@ -68,7 +68,8 @@ def ssh_port(label: str = "") -> int:
     return next(iter(_PORT.values())) if _PORT else SSH_PORT
 MEM_MB = int(os.environ.get("ICE_VM_MEM", "4096"))
 CPUS = int(os.environ.get("ICE_VM_CPUS", "4"))
-BOOT_TIMEOUT = float(os.environ.get("ICE_VM_BOOT_TIMEOUT", "240"))
+# 240s was not enough on a cold page cache: a 4 GiB image on a box that had just rebooted reached the login prompt and had sshd up, but after the wait had already given up -- and the episode was lost to a machine that was fine.
+BOOT_TIMEOUT = float(os.environ.get("ICE_VM_BOOT_TIMEOUT", "480"))
 
 # One multiplexed connection per VM instead of one per call. Waiting for a case opens an ssh every
 # few seconds for up to fifteen minutes, and the episode that lost its target failed with
@@ -477,8 +478,12 @@ def wait_for_ssh(label: str, timeout: float = BOOT_TIMEOUT) -> None:
             return
         if not running(label):
             raise RuntimeError(f"{label} died while booting; see {VM_DIR}/{label}.console.log")
+        waited = time.time() - t0
+        if waited > 60 and int(waited) % 60 < 3:
+            print(f"  [boot {label}] still no ssh after {waited:.0f}s (of {timeout:.0f}s)")
         time.sleep(3)
-    raise RuntimeError(f"{label} never answered ssh in {timeout:.0f}s")
+    raise RuntimeError(f"{label} never answered ssh in {timeout:.0f}s; "
+                       f"see {VM_DIR}/{label}.console.log")
 
 
 def ssh(argv: List[str], check: bool = True, timeout: Optional[float] = 300,
