@@ -271,7 +271,11 @@ def hand_over_case(t0: Optional[Dict[str, Any]], t1: Dict[str, Any]) -> int:
     prev = Snapshot.from_dict(t0) if t0 else None
     cur = Snapshot.from_dict(t1)
     entries = perception_diff(prev, cur, Baseline(), learning=False)
-    payload = {"snapshot": t1, "entries": [e.to_dict() for e in entries]}
+    # The baseline goes over with it. Without it the daemon has no T0 at all -- the perception loop
+    # that used to leave one in the store does not run during a recording -- so the state diff in the
+    # agent's prompt renders every row of every table as `+`, including root's own SSH key and the
+    # 34 stock accounts. An agent reading that deletes root's key, correctly, from a false premise.
+    payload = {"snapshot": t1, "baseline": t0, "entries": [e.to_dict() for e in entries]}
     body = json.dumps(payload, ensure_ascii=False)
     tmp = f"{STATE}/INVESTIGATE_NOW.tmp"
     vsh(f"mkdir -p {json.dumps(str(STATE))} && cat > {tmp} <<'ICEHANDOVER'\n{body}\nICEHANDOVER\n"

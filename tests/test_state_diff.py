@@ -136,3 +136,29 @@ def test_the_orchestrator_rebuilds_it_that_way() -> None:
     body = src[src.index("def investigate_handed_over"):src.index("def run_forever")]
     assert 'Provenance(**(e.get("provenance") or {}))' in body
     assert "ChangeType(e[\"type\"])" in body and "Direction(e.get(\"direction\"" in body
+
+def test_a_baseline_of_nothing_marks_the_whole_machine_as_new() -> None:
+    """The failure this guards against, stated as the agent saw it: with no T0 in the store, every
+    row of every escalated table rendered as `+` -- all 34 stock accounts, all 15 critical files and
+    root's own SSH key. The agent then deleted root's key, reasoning correctly from a false input."""
+    t1 = Snap({"ssh_keys": {f"root#{KEY}": {"username": "root"},
+                            f"butter#{KEY}": {"username": "butter"}}})
+    block = diff_mod.render(None, t1, ["ssh_keys"])["ssh_keys"]
+    body = block.splitlines()[1:]
+    assert all(l.startswith("+ ") for l in body)        # what we must never hand an agent again
+
+
+def test_the_recorder_hands_the_baseline_over_and_the_daemon_stores_it() -> None:
+    """Two halves of one contract, read as text: the recording's daemon runs no perception loop, so
+    the hand-over is the only thing that can put a T0 in the store for `before()` to find."""
+    root = Path(__file__).resolve().parents[1]
+    rec = (root / "ice" / "exercise" / "record.py").read_text()
+    body = rec[rec.index("def hand_over_case"):rec.index("def _mcp_port")]
+    assert '"baseline": t0' in body
+
+    src = (root / "ice" / "daemon" / "orchestrator.py").read_text()
+    handed = src[src.index("def investigate_handed_over"):src.index("def run_forever")]
+    assert 'payload.get("baseline")' in handed
+    assert "self.store.save(snap)" in handed
+    # and the baseline must be stored before the case runs, or `before()` still finds nothing
+    assert handed.index("self.store.save(snap)") < handed.index("return self.run_case")

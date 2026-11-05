@@ -622,6 +622,8 @@ class Orchestrator:
         f.unlink(missing_ok=True)
         try:
             t1 = snap_mod.Snapshot.from_dict(payload["snapshot"])
+            t0 = (snap_mod.Snapshot.from_dict(payload["baseline"])
+                  if payload.get("baseline") else None)
             # to_dict() flattens the nested dataclasses, so they have to be rebuilt: a
             # Provenance left as a dict crashed the investigation on e.provenance.user, after the
             # hand-over had already been audited, so the episode looked like an agent that did
@@ -636,10 +638,25 @@ class Orchestrator:
         if not entries:
             log.warning("handed-over investigation had no entries")
             return None
+        # Both readings go into the store, because everything downstream looks for them there:
+        # `_investigate_and_respond` asks `store.before(t1.ts)` for the baseline it renders the state
+        # diff against, and the agent's own snapshot tool loads T0 and T1 by timestamp. During a
+        # recording nothing else ever writes a snapshot, so without this the baseline is None and the
+        # diff claims every row in every table is new -- root's SSH key with the rest of them.
+        for snap in (t0, t1):
+            if snap is not None:
+                try:
+                    self.store.save(snap)
+                except OSError as e:
+                    log.warning("could not store the handed-over %s reading: %s",
+                                "baseline" if snap is t0 else "current", e)
         results = evaluate_many(entries)
         escalated = [r for r in results if r.escalate]
-        log.info("handed over: %d entries, %d escalated", len(entries), len(escalated))
-        self.rt.audit.write("handed_over", entries=len(entries), escalated=len(escalated))
+        log.info("handed over: %d entries, %d escalated, baseline %s",
+                 len(entries), len(escalated),
+                 "present" if t0 is not None else "MISSING (diff will read as all-new)")
+        self.rt.audit.write("handed_over", entries=len(entries), escalated=len(escalated),
+                            baseline=t0.ts if t0 is not None else None)
         return self.run_case(escalated or results, t1=t1)
 
     def run_forever(self, stop: Optional[threading.Event] = None) -> None:
