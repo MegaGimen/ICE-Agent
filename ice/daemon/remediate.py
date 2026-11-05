@@ -31,6 +31,30 @@ def _sqlstr(v: str) -> str:
     return v.replace("'", "''")
 
 
+def _rows(sql: str) -> List[dict]:
+    try:
+        return run_query(sql) or []
+    except OsqueryError:
+        return []
+
+
+def _shared_home(home: str, user: str) -> List[str]:
+    """Other accounts that live in the same home directory as `user`.
+
+    The case this exists for: `useradd -g 0 -M -d /root butter` gives the attacker an account whose
+    home is root's. osquery then reads /root/.ssh/authorized_keys for butter as well and reports
+    root's one key under both names, so a change entry about "butter's SSH key" names a file that
+    belongs to root and holds root's key. Removing it locks the real owner out of the machine, which
+    is worse than the intrusion we are containing -- and this path is the deterministic one, so it
+    would do it with no model in the loop.
+    """
+    if not home:
+        return []
+    return sorted({r.get("username") for r in
+                   _rows(f"SELECT username FROM users WHERE directory = '{_sqlstr(home)}'")
+                   if r.get("username") and r.get("username") != user})
+
+
 def _containment(entry: ChangeEntry) -> Optional[ProposedAction]:
     """Map one gate-flagged change to a conservative removal command, if the artifact still exists."""
     t, user = entry.type, (entry.provenance.user or "")
@@ -53,16 +77,32 @@ def _containment(entry: ChangeEntry) -> Optional[ProposedAction]:
     if t is ChangeType.SSH_KEY and user:
         if not _q1(f"SELECT 1 FROM users u JOIN authorized_keys k USING (uid) WHERE u.username = '{_sqlstr(user)}'"):
             return None
-        home = (run_query(f"SELECT directory FROM users WHERE username='{_sqlstr(user)}'") or [{}])[0].get("directory")
+        home = (_rows(f"SELECT directory FROM users WHERE username='{_sqlstr(user)}'") or [{}])[0].get("directory")
         if not home:
             return None
-        return ProposedAction(command=f"rm -f {home}/.ssh/authorized_keys",
-                              intent=f"Remove the attacker SSH authorized key(s) for {user}", targets=[f"{home}/.ssh/authorized_keys"])
+        path = (entry.untrusted or {}).get("key_file") or f"{home}/.ssh/authorized_keys"
+        shared = _shared_home(home, user)
+        if shared:
+            # The file is somebody else's. Deleting it would take away their access, so the account
+            # removal below is the whole containment and a human gets told why.
+            log.warning("not removing %s: %s is also the home of %s",
+                        path, home, ", ".join(shared))
+            return None
+        return ProposedAction(command=f"rm -f {path}",
+                              intent=f"Remove the attacker SSH authorized key(s) for {user}", targets=[path])
 
     if t is ChangeType.ACCOUNT:
         u = key or user
         if not u or not _q1(f"SELECT 1 FROM users WHERE username = '{_sqlstr(u)}'"):
             return None
+        home = (_rows(f"SELECT directory FROM users WHERE username='{_sqlstr(u)}'") or [{}])[0].get("directory")
+        # -r removes the home directory, and an attacker-created account can be pointed at somebody
+        # else's: `-d /root` makes `userdel -r` delete root's home. The account goes either way; its
+        # files only go when the directory is the account's own.
+        if home and _shared_home(home, u):
+            return ProposedAction(command=f"userdel {u}",
+                                  intent=f"Remove the attacker-created account {u}, leaving {home} "
+                                         f"alone (it is also another account's home)", targets=[u])
         return ProposedAction(command=f"userdel -r {u}",
                               intent=f"Remove the attacker-created account {u}", targets=[u])
 

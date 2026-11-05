@@ -104,6 +104,13 @@ def wake_message(case_id: str, host: str, escalations: List[Dict[str, Any]],
             "baseline is not sent separately, it is the unmarked lines. This is the current state, "
             "not a list of the attack's work: a `+` can be an ordinary change, and it can be "
             "something that already existed showing up under a new key.",
+            "A row's key is how the table identifies it, not a thing of its own. In `ssh_keys` a row "
+            "is one account paired with one key, read out of a file -- so the same key hash under two "
+            "accounts is one key in one file, and a `+` there can mean a new account was pointed at "
+            "an existing home, not that a key was added. Compare the hash with the unmarked rows "
+            "before you treat a key as the attacker's, and never remove a key file that holds a key "
+            "the baseline already had: the machine's own access lives in those files, and taking "
+            "away the account is what takes away the attacker's.",
             *(f"```\n{block}\n```" for block in state_diff.values()),
         ]
     if knowledge:
