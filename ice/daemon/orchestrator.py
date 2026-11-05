@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ice.daemon import kb, remediate
 from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
 from ice.daemon.contracts import (Case, CaseStatus, ChangeEntry, ChangeType, Direction,
-                                   GateDecision, new_id)
+                                   GateDecision, Provenance, new_id)
 from ice.daemon.detect.gate import GateResult, evaluate_many
 from ice.daemon.evolve.error_book import ErrorBook
 from ice.daemon.investigate import agent, prompts
@@ -622,8 +622,13 @@ class Orchestrator:
         f.unlink(missing_ok=True)
         try:
             t1 = snap_mod.Snapshot.from_dict(payload["snapshot"])
+            # to_dict() flattens the nested dataclasses, so they have to be rebuilt: a
+            # Provenance left as a dict crashed the investigation on e.provenance.user, after the
+            # hand-over had already been audited, so the episode looked like an agent that did
+            # nothing rather than like a rig that broke.
             entries = [ChangeEntry(**{**e, "type": ChangeType(e["type"]),
-                                      "direction": Direction(e.get("direction", "na"))})
+                                      "direction": Direction(e.get("direction", "na")),
+                                      "provenance": Provenance(**(e.get("provenance") or {}))})
                        for e in payload["entries"]]
         except Exception as e:                            # noqa: BLE001 - report, never crash
             log.exception("handed-over investigation malformed: %s", e)

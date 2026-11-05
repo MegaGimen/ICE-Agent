@@ -100,3 +100,39 @@ if __name__ == "__main__":
         if name.startswith("test_"):
             fn()
     print("ok: the table goes with the change, and the unmarked lines are the baseline")
+
+
+def test_a_handed_over_entry_is_rebuilt_whole() -> None:
+    """to_dict() flattens the nested dataclasses, and a Provenance left as a dict crashed the
+    investigation on e.provenance.user -- after the hand-over had been audited, so the episode read
+    as an agent that did nothing rather than as a rig that broke."""
+    import json as _json
+
+    from ice.daemon.contracts import ChangeEntry, ChangeType, Direction, Provenance
+
+    original = ChangeEntry(type=ChangeType.ACCOUNT, table="accounts", field="butter",
+                           value="added: account butter uid=1001",
+                           provenance=Provenance(who="useradd", pid=856, user="root"),
+                           untrusted={"username": "butter"})
+    payload = _json.loads(_json.dumps({"entries": [original.to_dict()]}))
+
+    rebuilt = [ChangeEntry(**{**e, "type": ChangeType(e["type"]),
+                              "direction": Direction(e.get("direction", "na")),
+                              "provenance": Provenance(**(e.get("provenance") or {}))})
+               for e in payload["entries"]][0]
+
+    # The attribute access that crashed, and the shapes the gate and the prompt rely on.
+    assert rebuilt.provenance.user == "root" and rebuilt.provenance.who == "useradd"
+    assert isinstance(rebuilt.type, ChangeType) and isinstance(rebuilt.direction, Direction)
+    assert rebuilt.untrusted == {"username": "butter"}
+    assert rebuilt.field.split("#", 1)[0] == "butter"
+
+
+def test_the_orchestrator_rebuilds_it_that_way() -> None:
+    """Read as text, not imported: the daemon's MCP dependency is not installed on every machine
+    that runs these tests, and this is a question about one line of code."""
+    src = (Path(__file__).resolve().parents[1]
+           / "ice" / "daemon" / "orchestrator.py").read_text()
+    body = src[src.index("def investigate_handed_over"):src.index("def run_forever")]
+    assert 'Provenance(**(e.get("provenance") or {}))' in body
+    assert "ChangeType(e[\"type\"])" in body and "Direction(e.get(\"direction\"" in body
