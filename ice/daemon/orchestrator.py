@@ -20,7 +20,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ice.daemon import kb, remediate
 from ice.daemon.backward.verify import BackwardVerifier, configure_backward, judge_quality_provider
-from ice.daemon.contracts import Case, CaseStatus, ChangeEntry, GateDecision, new_id
+from ice.daemon.contracts import (Case, CaseStatus, ChangeEntry, ChangeType, Direction,
+                                   GateDecision, new_id)
 from ice.daemon.detect.gate import GateResult, evaluate_many
 from ice.daemon.evolve.error_book import ErrorBook
 from ice.daemon.investigate import agent, prompts
@@ -597,9 +598,61 @@ class Orchestrator:
                                         "the cleanup score is low-confidence.")
 
     # -- main loop -------------------------------------------------------------------
+    def investigate_file(self) -> Path:
+        """Where something outside can drop a case to investigate, with its own evidence.
+
+        Dataset recording uses it. The recorder knows what it armed and when, so having the daemon
+        rediscover it by polling the machine every 30 seconds buys nothing -- and the polling writes
+        a snapshot into the machine every cycle, which then shows up in the recording's own file
+        diff as changes nobody made. The reading is taken by the recorder instead and the case is
+        handed over complete.
+        """
+        return Path(os.environ.get("ICE_INVESTIGATE_NOW_FLAG")
+                    or (self.rt.conf.state_dir / "INVESTIGATE_NOW"))
+
+    def investigate_handed_over(self) -> Optional[str]:
+        """Run a case from the file above: its own snapshot and its own change entries."""
+        f = self.investigate_file()
+        try:
+            payload = json.loads(f.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            log.warning("handed-over investigation unreadable: %s", e)
+            f.unlink(missing_ok=True)
+            return None
+        f.unlink(missing_ok=True)
+        try:
+            t1 = snap_mod.Snapshot.from_dict(payload["snapshot"])
+            entries = [ChangeEntry(**{**e, "type": ChangeType(e["type"]),
+                                      "direction": Direction(e.get("direction", "na"))})
+                       for e in payload["entries"]]
+        except Exception as e:                            # noqa: BLE001 - report, never crash
+            log.exception("handed-over investigation malformed: %s", e)
+            return None
+        if not entries:
+            log.warning("handed-over investigation had no entries")
+            return None
+        results = evaluate_many(entries)
+        escalated = [r for r in results if r.escalate]
+        log.info("handed over: %d entries, %d escalated", len(entries), len(escalated))
+        self.rt.audit.write("handed_over", entries=len(entries), escalated=len(escalated))
+        return self.run_case(escalated or results, t1=t1)
+
     def run_forever(self, stop: Optional[threading.Event] = None) -> None:
         stop = stop or threading.Event()
         interval = self.rt.conf.snapshot_interval_s
+        # Recording: no perception loop at all. The daemon stays up for its tools, its approvals and
+        # its investigations, and waits to be handed a case instead of polling for one.
+        if os.environ.get("ICE_NO_PERCEPTION") == "1":
+            f = self.investigate_file()
+            log.warning("ICE_NO_PERCEPTION=1: no snapshots, no detection. Waiting on %s", f)
+            while not stop.is_set():
+                if f.exists():
+                    try:
+                        self.investigate_handed_over()
+                    except Exception:                     # noqa: BLE001
+                        log.exception("handed-over investigation failed")
+                stop.wait(1.0)
+            return
         # Something outside can ask for a cycle now instead of waiting out the interval. The dataset
         # recorder uses it: it knows the exact moment the attack finished, so there is no reason to
         # spend up to a full interval waiting for the loop to come round and notice.

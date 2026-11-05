@@ -15,9 +15,13 @@ export ICE_RECORD_MODE=1        # the decision model is not a safety-gate veto; 
 export ICE_AUTO_APPROVE=1       # no human in the loop
 export ICE_DRY_RUN=0            # execute for real
 
-# Force every change to investigation, but only while an attack is armed (the recorder touches the
-# flag just before arming). Forcing for the whole run spends the episode on reset/warmup noise.
-export ICE_FORCE_ESCALATE_FLAG="$ICE_STATE_DIR/FORCE_ESCALATE"
+# No perception loop and no detection. The recorder takes its own osquery readings at T0, T1 and T2
+# from outside and hands the daemon the case complete, because it armed the attack and knows when.
+# Detection was never what a recording measured -- the forced-escalation flag short circuited the
+# gate from the start -- and the polling wrote a snapshot into the machine every 30 seconds, which
+# landed in the recording's own file diff as changes nobody made. Measuring detection needs its own
+# episodes with this off.
+export ICE_NO_PERCEPTION=1
 
 # No safety gate while recording. A deployment has one; a recording of what the agent would do must
 # not, or the trajectory is of something else. One episode chose `rm -f /root/.ssh/authorized_keys`,
@@ -53,7 +57,7 @@ export ICE_RECORD_SETTLE="${ICE_RECORD_SETTLE:-60}"     # seconds for remediatio
 
 echo ">>> recording: RECORD_MODE=$ICE_RECORD_MODE AUTO_APPROVE=$ICE_AUTO_APPROVE DRY_RUN=$ICE_DRY_RUN" \
      "DENY_CRITICAL=$ICE_DENY_CRITICAL_ASSETS"
-echo ">>> force-escalate flag: $ICE_FORCE_ESCALATE_FLAG"
+echo ">>> perception: off (the recorder takes its own readings and hands over the case)"
 # Where finished bundles go. The recording box is a rented instance and its disk goes with it, so a
 # bundle that exists only there is one release away from gone. ICE_INTAKE_* is host-only: the token
 # must not reach the VM, which is the machine under attack.

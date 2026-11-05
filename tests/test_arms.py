@@ -197,6 +197,27 @@ def test_an_unscored_episode_keeps_its_disks() -> None:
             record.DATASET = real
 
 
+def test_t0_is_the_image_and_nothing_is_prepared_in_the_episode() -> None:
+    """Preparing inside the episode once charged the attack with the recorder's own setup -- the
+    systemd unit and every file a repo sync had touched showed up as the attack's footprint and then
+    as "not cleared". Done in the right order it still left every episode with a baseline of its
+    own, so no two bundles were measured against the same thing."""
+    import inspect
+
+    from ice.exercise import record, vm
+
+    run = inspect.getsource(record.run_episode)
+    assert "vm.BASE_LABEL" in inspect.getsource(record.run_episode) or True
+    assert '"baseline": vm.BASE_LABEL' in run
+    # No baseline snapshot, and no shutdown before the attack.
+    assert 'vm.snapshot(images["baseline"]' not in run
+    armed = run.index("for c in arm[\"commands\"]")
+    assert "vm.shutdown" not in run[:armed], "the episode still stops the machine before the attack"
+    # The readings are the recorder's own, taken at three moments.
+    for label in ('"t0"', '"t1"', '"t2"'):
+        assert f"runtime_reading(ep_dir, {label})" in run
+
+
 def test_the_armed_snapshot_does_not_stop_the_machine() -> None:
     """Shutting down for T1 cost more than the 17 seconds: the reboot between the attack and the
     investigation destroyed the attack's runtime state, so a process it started or a socket it held
@@ -212,8 +233,9 @@ def test_the_armed_snapshot_does_not_stop_the_machine() -> None:
     armed = run.index("snapshot_live(images[\"armed\"]")
     case = run.index("wait_for_case(")
     assert "vm.shutdown" not in run[armed:case], "the machine is still being stopped for T1"
-    # And the daemon is woken at once rather than waited for.
-    assert "CYCLE_NOW" in run[armed:case]
+    # And the case is handed over complete rather than waited for: the recorder armed it and knows
+    # when, so the daemon does not have to poll the machine to rediscover it.
+    assert "hand_over_case(" in run[armed:case]
 
     # The live snapshot asks qemu to do it, and records which file the frozen one actually is --
     # qemu keeps writing to a new overlay and cannot rename the old one while it holds it open.
@@ -269,6 +291,21 @@ def test_the_repo_sync_addresses_this_episodes_vm_and_proves_it_landed() -> None
     vm._PORT["ep-live"] = 2223
     assert vm.live_label() == "ep-live"
     vm._PORT.clear()
+
+
+def test_the_daemon_unit_will_actually_start_at_boot() -> None:
+    """T0 is the image, so the product has to come up with the machine. The unit had no [Install]
+    section, so `systemctl enable` created no link -- and `is-enabled` answered `static` instead of
+    failing, so the check passed while nothing would have started."""
+    import inspect
+
+    from ice.exercise import record
+
+    assert "[Install]" in record.DAEMON_UNIT
+    assert "WantedBy=multi-user.target" in record.DAEMON_UNIT
+    src = inspect.getsource(record.prepare_image)
+    assert 'test -L /etc/systemd/system/multi-user.target.wants/ice-daemon.service' in src
+    assert 'vsh("systemctl is-enabled' not in src
 
 
 if __name__ == "__main__":

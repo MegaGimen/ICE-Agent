@@ -4,18 +4,20 @@ Each episode runs in a VM of its own, because the agent's later steps must build
 consequences of its earlier ones -- actions execute for real -- and because what it breaks then has
 to be its own machine rather than the recorder's.
 
-  1. boot    a fresh overlay over the golden image; snapshot it as T0, the machine the attack found.
-  2. arm     run the arm's commands for real, as root, then snapshot the result as T1.
-  3. observe the daemon notices the change, escalates, opens a case, investigates and remediates.
+  1. boot    a fresh overlay over the golden image, which already carries ICE installed and
+             enabled. T0 is that image: shared by every episode, prepared by nobody.
+  2. arm     run the arm's commands for real, as root, then snapshot the running machine as T1.
+  3. observe the recorder hands the daemon the case, which investigates and remediates.
   4. close   snapshot what the agent left as T2, and collect the audit, the case, the trajectory and
              the osquery snapshots -- over ssh if the machine still answers, off the final disk if
              it does not.
   5. score   seven axes, one judge run each, over the three snapshots (ice.exercise.reward).
 
 Recording posture (ice/serving/record_env_vm.sh):
-  ICE_FORCE_ESCALATE_FLAG  while that file exists every change reaches investigation, so no episode
-                           records nothing. The decision model is not consulted at all -- it used to
-                           be asked and then overridden.
+  ICE_NO_PERCEPTION=1      no perception loop and no detection. The recorder takes its own osquery
+                           readings at T0, T1 and T2 and hands the daemon the case complete, so the
+                           machine never has a snapshot written into it for the recording's file
+                           diff to pick up. The decision model is not consulted either.
   ICE_AUTO_APPROVE=1       no human in the loop
   ICE_DRY_RUN=0            actions really run; that is the point
   ICE_DENY_CRITICAL_ASSETS=0
@@ -182,6 +184,103 @@ def probe_exec(commands: List[str]) -> List[Dict[str, Any]]:
     return out
 
 
+def prepare_image() -> None:
+    """Install everything the episodes need into the golden image, once.
+
+    T0 is the image, so whatever an episode would have had to install must already be in it: the
+    daemon's unit, enabled so the product starts with the machine, the posture it reads, its state
+    directory, and the code under test. Preparing inside an episode is what once charged the attack
+    with the recorder's own setup, and even in the right order it gave every episode a baseline of
+    its own, so no two bundles were measured against the same thing.
+
+        python -m ice.exercise.record prepare      (after any change to ICE itself)
+    """
+    from ice.exercise import vm
+    refuse_host_daemon()
+    live = "prepare"
+    if vm.overlay_path(live).exists():
+        vm.drop(live)
+    vm.create_overlay(live)
+    vm.boot(live)
+    try:
+        pushed = push_posture()
+        install_daemon_unit()
+        sync_repo()
+        vsh(f"mkdir -p {json.dumps(str(STATE))} && systemctl enable ice-daemon.service",
+            label="enable the daemon at boot", check=True)
+        # The link, not `is-enabled`: a unit with no [Install] section reports `static` rather than
+        # failing, so enable looked like it had worked while nothing would start at boot.
+        vsh("test -L /etc/systemd/system/multi-user.target.wants/ice-daemon.service",
+            label="verify it will start at boot", check=True)
+        print(f"  posture: {len(pushed)} var(s)")
+    finally:
+        vm.shutdown(live)
+    # The prepared disk becomes the golden image, and the old one is kept beside it.
+    base = vm.overlay_path(vm.BASE_LABEL)
+    keep = base.with_name(base.name + f".before-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+    prepared = vm.overlay_path(live)
+    print(f"  flattening {prepared.name} onto {base.name} (old image kept as {keep.name})")
+    subprocess.run(["qemu-img", "convert", "-O", "qcow2", str(prepared), str(base) + ".new"],
+                   check=True)
+    base.rename(keep)
+    Path(str(base) + ".new").rename(base)
+    vm.drop(live)
+    print(f"  the golden image is now T0: ICE installed, enabled, and the code under test in it")
+
+
+def runtime_reading(ep_dir: Path, label: str) -> Optional[Dict[str, Any]]:
+    """One osquery reading of the VM, taken by the recorder and kept on the host.
+
+    The daemon used to do this every 30 seconds and keep the results inside the machine, which put a
+    file into /root/ice-state/snapshots every cycle -- so a recording's own file diff carried thirty
+    changes nobody made, and the judge had to be told to attribute them. The recorder knows which
+    three moments matter, so it takes three readings and they live out here.
+    """
+    script = ("set -a; [ -f /root/.ice-env ] && . /root/.ice-env; "
+              "cd /root/ICE && . ice/serving/env.vm.sh >/dev/null 2>&1; set +a; "
+              "\"${ICE_DAEMON_PY:-python3}\" - <<'EOF'\n"
+              "import json\n"
+              "from ice.daemon.perception.snapshot import collect\n"
+              "print(json.dumps(collect().to_dict()))\n"
+              "EOF\n")
+    p_ = vsh(script, label=f"reading {label}", timeout=180)
+    try:
+        got = json.loads(p_.stdout[p_.stdout.index("{"):])
+    except (ValueError, json.JSONDecodeError) as e:
+        print(f"  !! reading {label} failed: {e}; {(p_.stderr or '')[-200:]}")
+        return None
+    out = ep_dir / f"runtime-{label}.json"
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(got, ensure_ascii=False))
+    tables = sum(len(v) for v in (got.get("data") or {}).values())
+    print(f"  [reading {label}] {tables} table(s), {out.stat().st_size // 1024} KiB on the host")
+    return got
+
+
+def hand_over_case(t0: Optional[Dict[str, Any]], t1: Dict[str, Any]) -> int:
+    """Diff the two readings here, and hand the daemon the case complete.
+
+    Detection is not what a recording measures -- the forced-escalation flag has always short
+    circuited it -- so having the daemon rediscover an attack the recorder just armed buys nothing
+    and costs a snapshot inside the machine every cycle.
+    """
+    from ice.daemon.perception.diff import diff as perception_diff
+    from ice.daemon.perception.snapshot import Snapshot
+    from ice.daemon.perception.store import Baseline
+
+    prev = Snapshot.from_dict(t0) if t0 else None
+    cur = Snapshot.from_dict(t1)
+    entries = perception_diff(prev, cur, Baseline(), learning=False)
+    payload = {"snapshot": t1, "entries": [e.to_dict() for e in entries]}
+    body = json.dumps(payload, ensure_ascii=False)
+    tmp = f"{STATE}/INVESTIGATE_NOW.tmp"
+    vsh(f"mkdir -p {json.dumps(str(STATE))} && cat > {tmp} <<'ICEHANDOVER'\n{body}\nICEHANDOVER\n"
+        f"mv {tmp} {STATE}/INVESTIGATE_NOW",
+        label=f"hand over {len(entries)} change(s)", check=True, timeout=120)
+    print(f"  [hand-over] {len(entries)} change(s) from the recorder's own two readings")
+    return len(entries)
+
+
 def _mcp_port() -> int:
     return int(os.environ.get("ICE_MCP_PORT", "8083"))
 
@@ -223,6 +322,9 @@ ExecStart=%s -m ice.daemon.main --no-slack
 Restart=no
 StandardOutput=append:/root/ice-build/daemon.log
 StandardError=append:/root/ice-build/daemon.log
+
+[Install]
+WantedBy=multi-user.target
 """
 
 
@@ -459,38 +561,6 @@ def _listed_paths(out: str) -> List[str]:
     return [w for w in out.split() if w.startswith("/")]
 
 
-def pick_snapshots(armed_at: float) -> List[str]:
-    """The three osquery snapshots that bracket the episode, by their own timestamps.
-
-    Each snapshot is named for the time it was taken, so the recorder can choose them from the
-    arming time without asking ICE which ones it used. Falls back to the newest three when the
-    arming time is unknown, which is still three snapshots rather than none.
-    """
-    out = vsh(f"ls {STATE}/snapshots/*.json 2>/dev/null", timeout=60)
-    paths = sorted(_listed_paths(out.stdout))
-    if not paths:
-        print("  [osquery] the perception store has no snapshots")
-        return []
-
-    def stamp(path: str) -> float:
-        try:
-            return float(Path(path).stem)
-        except ValueError:
-            return 0.0
-
-    if not armed_at:
-        return paths[-3:]
-    before = [p for p in paths if stamp(p) and stamp(p) <= armed_at]
-    after = [p for p in paths if stamp(p) > armed_at]
-    picked = [p for p in (before[-1] if before else None,
-                          after[0] if after else None,
-                          paths[-1]) if p]
-    chosen = list(dict.fromkeys(picked))
-    print(f"  [osquery] {len(chosen)} snapshot(s) chosen around the arming time "
-          f"out of {len(paths)}")
-    return chosen
-
-
 def pull(remote: str, local: Path) -> bool:
     """Copy one file out of the VM."""
     from ice.exercise import vm
@@ -658,25 +728,24 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]],
 
 
 def _osquery_snapshots(ep_dir: Path) -> Dict[str, Any]:
-    """Load the T0/T1/T2 osquery snapshots collect() pulled out of the VM, oldest first.
+    """The three runtime readings the recorder took, for the judge's GetRuntime.
 
-    No longer keyed on the case's own pointers. They were wrong once -- ICE records t2 before the
-    last approved action has run, which scored `rm -f /etc/cron.d/persistevil` as not cleared in an
-    episode whose audit shows it ran with rc=0 -- and on an episode with no case there are no
-    pointers at all, which left the runtime axis with a tool that errored on every call.
+    These are the recorder's own, taken at T0, T1 and T2 from outside. They used to be harvested
+    from the daemon's own perception store, which meant the daemon had to be polling the machine
+    every 30 seconds and writing a file inside it each time -- thirty changes in a recording's file
+    diff that nobody made, and a case's own t0/t1 pointers that were wrong once besides.
     """
     from ice.exercise import snapshot_reward as sr
-    files = sorted(ep_dir.glob("osq-*.json"), key=lambda p: p.stem)
-    if not files:
-        print("  [osquery] no snapshots were pulled out of the VM")
-        return {}
-    labels = ("t0", "t1", "t2")
-    if len(files) < 3:
-        print(f"  [osquery] only {len(files)} snapshot(s); the runtime tables will be partial")
-    snaps = {lab: sr.load(f) for lab, f in zip(labels, files[:3])}
-    if len(files) > 3:                                   # keep the newest as the end state
-        snaps["t2"] = sr.load(files[-1])
-    return snaps
+    out: Dict[str, Any] = {}
+    for label in ("t0", "t1", "t2"):
+        f = ep_dir / f"runtime-{label}.json"
+        if f.exists():
+            out[label] = sr.load(f)
+    if not out:
+        print("  [runtime] no readings were taken")
+    elif len(out) < 3:
+        print(f"  [runtime] only {sorted(out)}; the runtime tables will be partial")
+    return out
 
 
 EVIDENCE_DIFF_CAP = int(os.environ.get("ICE_EVIDENCE_DIFF_CAP", "20000"))
@@ -840,8 +909,8 @@ def collect(ep_dir: Path, case: Optional[Dict[str, Any]], armed_at: float = 0.0)
     listing = vsh(f"ls {STATE}/cases/case-*.json 2>/dev/null", timeout=60)
     for path in _listed_paths(listing.stdout):
         pull(path, ep_dir / Path(path).name)
-    for path in pick_snapshots(armed_at):
-        pull(path, ep_dir / ("osq-" + Path(path).name))
+    # ICE's own perception store is not harvested any more: with no perception loop there is
+    # nothing in it, and the runtime readings are the recorder's own (runtime_reading).
     pull("/root/ice-build/daemon.log", ep_dir / "daemon.log")
 
     # The trajectory has to be fetched here, not in export(). export() runs after the machine has
@@ -1016,7 +1085,7 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
         "armed_at": armed_at,
         "recorded_at": time.time(),
         "posture": {k: os.environ.get(k) for k in
-                    ("ICE_RECORD_MODE", "ICE_FORCE_ESCALATE", "ICE_AUTO_APPROVE", "ICE_DRY_RUN",
+                    ("ICE_RECORD_MODE", "ICE_NO_PERCEPTION", "ICE_AUTO_APPROVE", "ICE_DRY_RUN",
                      "ICE_DENY_CRITICAL_ASSETS")},
         "grade": det,
         # Any deliberate interference with this episode, so a bundle is never mistaken for one the
@@ -1055,8 +1124,9 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
     from ice.exercise import image, vm
     ep = f"{scenario.id}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{index:03d}"
     images = boot_target(ep)
-    images.update({"baseline": f"{ep}-clean", "armed": f"{ep}-armed",
-                   "final": f"{ep}-final"})
+    # The baseline is the golden image itself, shared by every episode, so T1 - T0 and T2 - T0 are
+    # measured against the same thing in every bundle.
+    images.update({"baseline": vm.BASE_LABEL, "armed": f"{ep}-armed", "final": f"{ep}-final"})
     live = images["live"]
     try:
         arm = arm_of(scenario)
@@ -1065,26 +1135,20 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         dirty = verify_clean(scenario)
         if dirty:
             print(f"  !! the golden image carries scenario residue: {dirty} — flagged in the bundle")
-        # The baseline has to be the machine as the attack found it, which means after the recorder
-        # has finished preparing it. Scoring against the golden image instead charged the attack
-        # with the recorder's own setup: the systemd unit, and every file sync_repo() had just
-        # updated, showed up as attack footprint and then as "not cleared".
-        print("  snapshotting the prepared machine as the baseline")
-        stop_daemon()
-        vm.shutdown(live)
-        vm.snapshot(images["baseline"], of=live)
-        vm.boot(live)
-        start_daemon()
-        time.sleep(float(os.environ.get("ICE_RECORD_WARMUP", "75")))
+
+        # T0 is the golden image. Nothing is prepared inside the episode and nothing is snapshotted
+        # for it: the image already carries ICE installed and enabled, so what boots is a healthy
+        # machine with the product running on it, which is what a deployment looks like. Preparing
+        # inside the episode is what once charged the attack with the recorder's own setup -- the
+        # systemd unit and every file a repo sync had touched -- and even done in the right order it
+        # left every episode with a baseline of its own, so no two were measured against the same
+        # thing.
+        ep_dir = DATASET / ep
+        t0_reading = runtime_reading(ep_dir, "t0")
 
         print(f"=== arm {scenario.id}/{arm['arm']} "
               f"({'; '.join(arm['commands'])[:100]}) ===")
         armed = time.time()
-        # Force escalation only from here on. Before this point the only changes are the warmup's.
-        flag = os.environ.get("ICE_FORCE_ESCALATE_FLAG")
-        if flag:
-            vsh(f"mkdir -p {json.dumps(str(Path(flag).parent))} && touch {json.dumps(flag)}",
-                label="force-escalate on")
         for c in arm["commands"]:
             vsh(c, arm["arm"])
 
@@ -1095,9 +1159,12 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         # because the agent had cleaned anything but because the reboot had.
         print("  snapshotting the armed machine without stopping it")
         vm.snapshot_live(images["armed"], of=live)
-        # And the recorder knows the exact moment the attack finished, so there is no reason to wait
-        # out a perception interval for the daemon to come round and notice.
-        vsh(f"touch {json.dumps(str(STATE / 'CYCLE_NOW'))}", label="wake the daemon now")
+        t1_reading = runtime_reading(ep_dir, "t1")
+        # And the case is handed over complete rather than discovered: the recorder armed it and
+        # knows when, and the daemon's own polling would write a snapshot into the machine every
+        # cycle for a diff the recorder can take from outside.
+        if t1_reading:
+            hand_over_case(t0_reading, t1_reading)
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
         case = wait_for_case(arm["markers"], armed, live)
@@ -1122,7 +1189,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
             stop_daemon()
             probe["exec"] = probe_exec(PROBE_EXEC)
 
-        ep_dir = DATASET / ep
+        t2_reading = runtime_reading(ep_dir, "t2")
         collect(ep_dir, case, armed_at=armed)
         collect_host_side(ep_dir, live)
         stop_daemon()
@@ -1247,12 +1314,16 @@ def scored_already(stem: str) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser(description="ICE trajectory dataset recorder")
     sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("prepare", help="install ICE into the golden image, so T0 is the image")
     r = sub.add_parser("run", help="record episodes")
     r.add_argument("scenario", choices=sorted(SCENARIOS))
     r.add_argument("--episodes", type=int, default=1)
     a = ap.parse_args()
     if os.environ.get("ICE_RECORD_MODE") != "1":
         raise SystemExit("set the recording posture first: source ice/serving/record_env.sh")
+    if a.cmd == "prepare":
+        prepare_image()
+        return
     DATASET.mkdir(parents=True, exist_ok=True)
     scenario = SCENARIOS[a.scenario]
     results = []
