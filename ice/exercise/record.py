@@ -1169,8 +1169,6 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
         case = wait_for_case(arm["markers"], armed, live)
-        if flag:
-            vsh(f"rm -f {json.dumps(flag)}")
         probe: Dict[str, Any] = {}
         if case:
             print(f"  case {case.get('case_id')} "
