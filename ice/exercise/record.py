@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import calendar
 import json
 import os
 import sqlite3
@@ -650,6 +651,20 @@ class TargetLost(RuntimeError):
     """The episode's machine stopped answering. Not a detection failure -- an infrastructure one."""
 
 
+def _created_after(case: Dict[str, Any], since: float, slack: float = 120.0) -> bool:
+    """Was this case opened in this episode, rather than left over in the image?
+
+    The image is prepared once and shared, so a case file from the preparation run would otherwise
+    be picked up as this episode's. An unparseable or missing timestamp counts as this episode's:
+    the recorder just handed one over, and refusing it would put us back to reporting "NO case".
+    """
+    raw = case.get("created") or case.get("updated") or ""
+    try:
+        return calendar.timegm(time.strptime(str(raw)[:19], "%Y-%m-%dT%H:%M:%S")) >= since - slack
+    except (ValueError, TypeError):
+        return True
+
+
 def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[str, Any]]:
     """Wait for ICE, inside the VM, to produce a case whose triggers mention the attack.
 
@@ -681,6 +696,17 @@ def wait_for_case(markers: List[str], since: float, live: str) -> Optional[Dict[
         for path in _listed_paths(listing.stdout):
             d = pull_json(path)
             if not d or "assessment" not in (d.get("_ice") or {}):
+                continue
+            if not markers:
+                # The benign arm has no artifact to match a case by, and `any(... for m in [])` is
+                # False, so it could never find one: it waited out the full 900 seconds and reported
+                # "NO case", which grade() then read as "nothing was investigated, which is correct".
+                # That was true when a case had to be discovered. The recorder now hands one over on
+                # every arm, so something *was* investigated, and whether it was called malicious is
+                # the whole point of the benign arm. Any case produced after the episode was armed is
+                # that case.
+                if _created_after(d, since):
+                    return d
                 continue
             trig = " ".join(t.get("value", "") + " " + t.get("field", "")
                             for t in d.get("triggers", []))
@@ -763,8 +789,12 @@ def grade(scenario: Scenario, case: Optional[Dict[str, Any]],
     benign = bool((arm or {}).get("benign"))
     if case is None:
         if benign:
-            return {"detected": False, "miss": False, "benign_arm": True,
-                    "reasons": ["nothing was investigated, which is correct: no attack was armed"]}
+            # The recorder hands a case over on every arm now, so "no case" on the benign arm means
+            # the investigation did not finish, not that ICE correctly stayed quiet. It is reported
+            # as what it is rather than as a pass.
+            return {"detected": False, "miss": False, "benign_arm": True, "no_case": True,
+                    "reasons": ["no investigated case within timeout; on this arm that is a rig "
+                                "result, not ICE staying quiet -- a case was handed over"]}
         return {"detected": False, "miss": True, "reasons": ["no investigated case within timeout"]}
     if benign:
         assessment = case.get("_ice", {}).get("assessment")

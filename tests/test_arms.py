@@ -53,7 +53,11 @@ def test_the_benign_arm_inverts_what_correct_means() -> None:
 
     quiet = record.grade(S, None, normal)
     assert quiet["miss"] is False and quiet["benign_arm"] is True
-    assert "correct" in quiet["reasons"][0]
+    # It is still not held against the agent, but it is no longer called correct: the recorder hands
+    # a case over on every arm, so no case means the investigation did not finish. See
+    # tests/test_benign_arm_case.py.
+    assert quiet["no_case"] is True
+    assert "rig result" in quiet["reasons"][0]
 
     # Investigating it and calling it malicious is a false positive, and that is the miss here.
     cried_wolf = record.grade(S, {"case_id": "c", "_ice": {"assessment": "malicious"}}, normal)
