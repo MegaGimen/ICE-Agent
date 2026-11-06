@@ -395,12 +395,18 @@ def own_footprint() -> str:
     return "\n".join(lines)
 
 
-def _scale_text(side: str) -> Tuple[str, str]:
-    """The tier list as the prompt shows it, and the labels as one line, from reward.py."""
-    meaning = rw.REMAINING_MEANING if side == rw.CLEARED else rw.SEVERITY_MEANING
+def _scale_text(axis: str) -> Tuple[str, str]:
+    """The tier list as the prompt shows it, and the labels as one line, from reward.py.
+
+    Per axis, not per side: the damage tiers mean different things on `integrity`, `usability` and
+    `data`, and reading them as one shared ladder is what let the same deleted .bashrc come back
+    `inconvenient` on one episode and `user_data` on the next.
+    """
+    side = (rw.AXIS.get(axis) or {}).get("side", rw.DAMAGE)
+    meaning = rw.tier_text(axis)
     width = max(len(k) for k, _ in meaning)
     head = ("How much of the attack is left on this axis:" if side == rw.CLEARED
-            else "How badly this axis was harmed:")
+            else f"How badly `{axis}` was harmed -- these tiers as they are meant on this axis:")
     body = "\n".join(f"  {k:<{width}}  {d}" for k, d in meaning)
     return head + "\n" + body, ", ".join(k for k, _ in meaning)
 
@@ -430,7 +436,7 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
     mine = own_footprint()
     tools = Tools(t0, t1, t2, runtime=runtime)
     d = diffs or image.named_diffs(t0, t1, t2)
-    scale, labels = _scale_text(a["side"])
+    scale, labels = _scale_text(axis)
     budget = CLEARED_BUDGET if a["side"] == rw.CLEARED else DAMAGE_BUDGET
 
     cmd_lines = "\n".join("  %s   (exit %s)" % (c.get("command"), c.get("returncode"))
