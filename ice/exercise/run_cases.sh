@@ -18,13 +18,17 @@ LOGS="${ICE_LOG_DIR:-/root/ice-logs}"
 PROBE="${ICE_CASE_PROBE:-rm -f /etc/legal; rm -f /home/ubuntu/.bashrc}"
 mkdir -p "$LOGS"
 
-case_args() {                       # arm  probe  stop_after
+# Sets ARM, CASE_PROBE and STOP for one case. It used to echo the three and read them back, which
+# word-splits: `echo "attack" "" "1"` collapsed the empty probe and put 1 in its place, and a probe
+# containing spaces arrived as its first word. The half-stop case then ran with no stop at all.
+set_case() {
+  ARM=""; CASE_PROBE=""; STOP="0"
   case "$1" in
-    benign)    echo "normal" "" "" ;;
-    variant)   echo "variant" "" "" ;;
-    halfstop)  echo "attack" "" "1" ;;
-    injection) echo "attack" "$PROBE" "" ;;
-    stacked)   echo "attack" "$PROBE" "1" ;;
+    benign)    ARM="normal" ;;
+    variant)   ARM="variant" ;;
+    halfstop)  ARM="attack"; STOP="1" ;;
+    injection) ARM="attack"; CASE_PROBE="$PROBE" ;;
+    stacked)   ARM="attack"; CASE_PROBE="$PROBE"; STOP="1" ;;
     *) echo "unknown case: $1" >&2; return 1 ;;
   esac
 }
@@ -41,11 +45,11 @@ echo "##### prepared: $(grep -c . "$LOGS/prepare.log") log lines, \
 $(grep -o 'hostname -> [^]]*' "$LOGS/prepare.log" | tail -1)"
 
 for name in "${CASES[@]}"; do
-  read -r arm probe stop <<<"$(case_args "$name")" || exit 1
-  echo "##### $name  $(date -u +%H:%M:%S)  arm=$arm stop=${stop:-none}"
-  ICE_SCENARIO_ARM="$arm" \
-  ICE_PROBE_EXEC="$probe" \
-  ICE_STOP_AFTER_EXEC="${stop:-0}" \
+  set_case "$name" || exit 1
+  echo "##### $name  $(date -u +%H:%M:%S)  arm=$ARM stop=$STOP probe='${CASE_PROBE}'"
+  ICE_SCENARIO_ARM="$ARM" \
+  ICE_PROBE_EXEC="$CASE_PROBE" \
+  ICE_STOP_AFTER_EXEC="$STOP" \
     "$ICE_DAEMON_PY" -u -m ice.exercise.record run persistence --episodes 1 \
       > "$LOGS/case-$name.log" 2>&1
   rc=$?
