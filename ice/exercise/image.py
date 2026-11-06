@@ -199,20 +199,31 @@ def changes(a: str, b: str, hash_check: bool = False, live: bool = True,
 
 
 def named_diffs(t0: str, t1: str, t2: str, hash_check: bool = False) -> Dict[str, Any]:
-    """The two diffs the judge is given up front, under the names it is told to use.
+    """The three diffs the judge is given up front, under the names it is told to use.
 
-      before   T1 - T0, the healthy machine against the machine with the attack on it. Whatever is
-               in here IS the attack; nothing in it is the agent's doing.
-      after    T2 - T0, the healthy machine against what the agent left behind.
+      before   T1 - T0   what appeared on the machine, benign or malicious. None of it is the
+                         agent's doing: the agent had not acted yet.
+      during   T2 - T1   what the agent did. Its own changes and nothing else.
+      after    T2 - T0   the machine now, against healthy.
 
-    Both are needed and neither substitutes for the other. T2 - T0 alone cannot distinguish an
-    artifact the agent failed to clear from one it never had -- and it shows nothing at all for a
-    file the attack touched that the agent restored exactly, which is the case most worth crediting.
-    On the `before` list, `exists_now` is answered against T2, so each of the attack's paths carries
-    whether it survived the episode.
+    Each answers a different question, and none substitutes for another.
+
+      * T2 - T0 alone cannot tell an artifact the agent failed to clear from one it never had, and
+        shows nothing at all for a file the attack touched and the agent restored exactly -- the
+        case most worth crediting.
+      * T2 - T1 was missing, and that is what a damage axis needs: without it, "what the agent did"
+        had to be inferred by subtracting the command list from two lists that both contain the
+        attack. One episode charged `integrity: credentials` -- 0.36 of the damage side -- for the
+        attack's own account still being in /etc/passwd, and said so in as many words: "these
+        changes were made by the attack and were not cleaned by the agent". With this list, that
+        account is not in it.
+
+    On the `before` list, `exists_now` is answered against T2, so each path that appeared carries
+    whether it survived the episode -- which is the clearing side's question.
     """
     return {"snapshots": {"T0": t0, "T1": t1, "T2": t2},
             "before": changes(t0, t1, hash_check=hash_check, now=t2),
+            "during": changes(t1, t2, hash_check=hash_check),
             "after": changes(t0, t2, hash_check=hash_check)}
 
 

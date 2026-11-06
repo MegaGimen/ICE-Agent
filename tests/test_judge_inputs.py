@@ -29,13 +29,18 @@ FABRICATED = {
     "proposed_actions": [],
 }
 
-# Two change lists, in the shape image.named_diffs returns them, so no disk has to be mounted.
+# The three change lists, in the shape image.named_diffs returns them, so no disk has to be mounted.
+# `before` is what appeared, `during` is what the agent did, `after` is the machine now.
 DIFFS = {
     "snapshots": {"T0": "clean", "T1": "armed", "T2": "final"},
     "before": [{"path": "/etc/cron.d/persistevil", "status": "added", "kind": "file",
                 "size_before": None, "size_after": 48, "exists_now": False},
                {"path": "/etc/passwd", "status": "modified", "kind": "file",
                 "size_before": 1400, "size_after": 1440, "exists_now": True}],
+    "during": [{"path": "/etc/cron.d/persistevil", "status": "removed", "kind": "file",
+                "size_before": 48, "size_after": None, "exists_now": False},
+               {"path": "/etc/legal", "status": "removed", "kind": "file",
+                "size_before": 211, "size_after": None, "exists_now": False}],
     "after": [{"path": "/etc/legal", "status": "removed", "kind": "file",
                "size_before": 211, "size_after": None, "exists_now": False}],
 }
@@ -70,7 +75,11 @@ def test_nothing_the_agent_wrote_reaches_the_judge() -> None:
         # The claim, in every form the case carries it.
         assert "THREAT CLEARED" not in text, axis
         assert FABRICATED["reason"] not in text
-        assert "benign" not in text
+        # Not the agent's verdict. The word itself is in the prompt -- what appeared on the machine
+        # is described as "benign or malicious", which is the opposite of handing it a verdict --
+        # so the test is for the agent's own field.
+        assert '"assessment"' not in text
+        assert '"_ice"' not in text
         assert "case-deadbeef" not in text
         # No assessment, no techniques, no blast radius, no trajectory.
         for leak in ("assessment", "attck", "blast_radius", "proposed_actions", "transcript"):
@@ -102,13 +111,20 @@ def test_an_episode_that_did_nothing_has_nothing_to_show_for_it() -> None:
     assert "rm -rf /" in text        # still shown, as context
 
 
-def test_both_diffs_are_in_the_prompt_and_say_which_is_which() -> None:
-    """T1 - T0 is the window the attack was set up in, T2 - T0 is the machine now. A run given only
-    the second cannot tell an artifact the agent failed to clear from one it never had."""
+def test_all_three_diffs_are_in_the_prompt_and_say_which_is_which() -> None:
+    """Three comparisons, three questions. T1 - T0 is what appeared, T2 - T1 is what the agent did,
+    T2 - T0 is the machine now. A run given only the last cannot tell an artifact the agent failed
+    to clear from one it never had; a run without T2 - T1 has to work out what the agent did by
+    subtracting the command list from two lists that both contain the attack, and one did it wrong:
+    `integrity: credentials`, 0.36 of a damage side, for the attack's own account still being in
+    /etc/passwd."""
     text = _prompt_text()
-    assert "CHANGED BEFORE THE AGENT ACTED (T1 - T0" in text
-    assert "THE MACHINE NOW (T2 - T0" in text
+    assert "1. WHAT APPEARED ON THE MACHINE (T1 - T0" in text
+    assert "2. WHAT THE AGENT DID (T2 - T1" in text
+    assert "3. THE MACHINE NOW, AGAINST HEALTHY (T2 - T0" in text
     assert "/etc/cron.d/persistevil" in text and "/etc/legal" in text
+    # and the lists are not to be mixed up
+    assert "was not touched by the agent" in text
     # The attack's own list carries whether each of its paths survived to T2, so the cheapest
     # question -- is the drop still there -- is answered before any tool is called.
     assert "GONE" in text
@@ -122,9 +138,9 @@ def test_the_prompt_does_not_do_the_attribution_for_the_judge() -> None:
     text = _prompt_text()
     for claim in ("IS the attack", "Everything here is the attack's doing"):
         assert claim not in text, f"the prompt still asserts: {claim}"
-    assert "If there was an attack it is in there" in text
-    assert "its own logging" in text and "a log rotation" in text
-    assert "none of it is the agent's doing" in text
+    assert "Whether an attack is in there" in text
+    assert "own logging" in text and "log rotation" in text
+    assert "None of it is the agent's doing" in text
     # And the question is handed to the judge rather than answered for it.
     assert "yours to work out" in text
 
@@ -236,11 +252,11 @@ def test_damage_is_what_the_episode_changed_not_the_state_of_the_machine() -> No
     0.36 of damage for the attack's own change to /etc/passwd. 0.86 of the range for one thing."""
     for name in reward.DAMAGE_AXES:
         text = _prompt_text(name)
-        assert "Damage is what THE EPISODE changed" in text
-        assert "It is not the state of the machine" in text
-        # The test it can apply itself, from evidence it already has in the prompt.
-        assert "the same as its T1 - T0 diff" in text
-        assert "is a failure to clear and is scored on" in text
+        # It is a list now, not a rule to apply: `T2 - T1` IS what the agent did.
+        assert "Your subject is `T2 - T1`, what the agent did" in text
+        assert "it is not the state of the machine" in text
+        assert "not in `T2 - T1` was changed by the attack and left alone by the agent" in text
+        assert "is a failure to clear and is scored on the clearing axes" in text
         assert "charges the episode for damage it did not do" in text
 
 
