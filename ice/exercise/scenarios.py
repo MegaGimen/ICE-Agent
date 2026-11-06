@@ -40,7 +40,15 @@ class Scenario:
 # Scenario 1 — Persistence (targets/SCENARIOS.md row 1).
 #   original: ART T1136.001 #6 (account in the root group) + T1053.003 #3 (cron in /etc/cron.d).
 #   variant : ART T1543.002 (a systemd service set to autostart) replacing the cron.
-#   normal  : install a real package (drops a systemd unit via dpkg) — benign, has a package trail.
+#   normal  : the ordinary provisioning of a deploy account -- an account with its own home, its own
+#             key, a cron entry that runs a system binary, and a package install. It has to be
+#             visible where the attack is visible: installing a package alone changed nothing in any
+#             table ICE watches, so the recorder's T0->T1 diff was 0 entries, no case was ever opened,
+#             and the benign arm measured nothing about the agent at all (it could not produce a
+#             false positive, only confirm that nothing broke). The shape is deliberately close to
+#             the attack's, and every discriminating detail is real: the home is the account's own,
+#             the group is the account's own, the key is a new key rather than one already on the
+#             machine, and the cron runs /usr/sbin/logrotate rather than something dropped with it.
 PERSISTENCE = Scenario(
     id="persistence",
     display="Persistence: privileged account + cron (ATT&CK T1136.001 + T1053.003)",
@@ -61,9 +69,22 @@ PERSISTENCE = Scenario(
     variant_cleanup=["systemctl disable art-persist.service", "rm -f /etc/systemd/system/art-persist.service"],
     variant_facts={"new_autostart_unit": True},
     variant_markers=["art-persist"],
-    normal=["apt-get install -y -q sl"],
-    normal_cleanup=["apt-get remove -y -q sl"],
-    normal_facts={"package_install": True},
+    normal=[
+        "useradd -m -s /bin/bash -c 'deploy service account' deploy",
+        "install -d -m 700 -o deploy -g deploy /home/deploy/.ssh",
+        # A key of its own, made on the machine: a new row in ssh_keys whose hash is nobody else's.
+        "ssh-keygen -q -t ed25519 -N '' -C 'deploy@ops' -f /root/.deploy_provision_key "
+        "&& install -m 600 -o deploy -g deploy /root/.deploy_provision_key.pub "
+        "/home/deploy/.ssh/authorized_keys "
+        "&& rm -f /root/.deploy_provision_key /root/.deploy_provision_key.pub",
+        "printf '17 3 * * * root /usr/sbin/logrotate /etc/logrotate.conf\\n' "
+        "> /etc/cron.d/logrotate-extra",
+        "apt-get install -y -q sl",
+    ],
+    normal_cleanup=["userdel -r deploy", "rm -f /etc/cron.d/logrotate-extra",
+                    "apt-get remove -y -q sl"],
+    normal_facts={"package_install": True, "service_account_provisioned": True,
+                  "legitimate_cron": True, "legitimate_ssh_key": True},
 )
 
 SCENARIOS: Dict[str, Scenario] = {s.id: s for s in (PERSISTENCE,)}
