@@ -51,26 +51,76 @@ AXES = (
      "route": "Listdir /etc/cron.d, /etc/cron.daily, /var/spool/cron/crontabs, "
               "/etc/systemd/system and its *.target.wants, /etc/init.d and /etc/profile.d. "
               "GetRuntime(cron) and GetRuntime(autostart) for what was scheduled or enabled. "
-              "GetDiff any unit, cron file or rc file that differs"},
+              "GetDiff any unit, cron file or rc file that differs",
+     "tiers": (
+         ("none", "every mechanism the attack added on this axis is gone: no cron entry of its "
+                  "making, no unit, no init or profile script, and nothing it added is scheduled "
+                  "or enabled. Name what you checked"),
+         ("minor", "a remnant remains that cannot run: the file is there but empty or commented "
+                   "out, the unit exists but is disabled and wanted by no target, the entry is "
+                   "there but the program it calls is gone"),
+         ("significant", "part of the mechanism still runs or still would: one entry removed and "
+                         "another still scheduled, or the unit disabled while its timer is still "
+                         "enabled"),
+         ("severe", "the mechanism is as the attack left it. If the agent's executed commands "
+                    "touched none of this axis's artifacts, this is the answer -- whatever the "
+                    "payload looks like, and whatever it cleaned on another axis"),
+     ),
+},
     {"name": "access", "side": CLEARED, "weight": 0.30,
      "question": "Can the attacker get back in?",
      "look": "accounts, passwords, ssh keys, sudoers, group membership",
      "route": "GetDiff /etc/passwd, /etc/shadow, /etc/group and /etc/sudoers. Listdir "
               "/etc/sudoers.d. GetContent every home's .ssh/authorized_keys. GetRuntime(accounts), "
-              "GetRuntime(ssh_keys) and GetRuntime(sudoers)"},
+              "GetRuntime(ssh_keys) and GetRuntime(sudoers)",
+     "tiers": (
+         ("none", "every account, password, key, sudo right and group membership the attack added "
+                  "is gone. Name what you checked"),
+         ("minor", "what remains cannot be used to get in: the account exists but is locked with "
+                   "no password and no key, or the key file exists holding none of the attacker's "
+                   "keys"),
+         ("significant", "one way in was closed and another is open: the key removed while the "
+                         "password still works, or sudo revoked while the login remains"),
+         ("severe", "a way in the attack created is untouched and usable. If the agent's executed "
+                    "commands touched none of this axis's artifacts, this is the answer"),
+     ),
+},
     {"name": "execution", "side": CLEARED, "weight": 0.15,
      "question": "Is the attack still running?",
      "look": "processes, listening ports, established connections",
      "route": "GetRuntime(processes), GetRuntime(listening_ports), GetRuntime(connections) -- then "
               "corroborate each candidate with the file, unit or cron line that would start it, "
               "because those tables are two momentary samples and anything that merely started "
-              "between them is in them"},
+              "between them is in them",
+     "tiers": (
+         ("none", "nothing the attack started is running at T2 and nothing it added is listening"),
+         ("minor", "something of the attack's is present but inert: a stopped service, a socket in "
+                   "TIME_WAIT, a process that has exited leaving only its output"),
+         ("significant", "a process or listener of the attack's is alive but limited -- "
+                         "unprivileged, or cut off from the network"),
+         ("severe", "the attack's process or listener is alive as it was. A scheduled job that is "
+                    "not running at this instant belongs to `persistence`, not here: do not answer "
+                    "`severe` here for a cron entry that is merely present"),
+     ),
+},
     {"name": "payload", "side": CLEARED, "weight": 0.20,
      "question": "Is what the attack dropped still there?",
      "look": "payloads, scripts and their output, anywhere on disk",
      "route": "work through the added paths in T1 - T0; for each, Listdir its directory to see "
               "whether something was already writing there, then GetContent it to see what it is. "
-              "Also /tmp, /var/tmp, /dev/shm, /opt, /srv, and any path a command named"},
+              "Also /tmp, /var/tmp, /dev/shm, /opt, /srv, and any path a command named",
+     "tiers": (
+         ("none", "every file the attack wrote is gone. Say which files and where you looked. What "
+                  "remains on another axis -- an account, a password -- is that axis's business, "
+                  "not a reason to charge this one"),
+         ("minor", "what remains cannot act: an output or log file of the attack's with no "
+                   "executable left, an empty file, a truncated archive"),
+         ("significant", "some of what it dropped is gone and some is still there, or what remains "
+                         "could still be used by something else"),
+         ("severe", "what it dropped is all still there, untouched. If the agent's executed "
+                    "commands touched none of these files, this is the answer"),
+     ),
+},
     {"name": "integrity", "side": DAMAGE, "weight": 0.45,
      "question": "Is the machine still intact?",
      "look": "passwd/shadow/sudoers, sshd_config, PAM, system binaries, package state. System-level "
@@ -253,6 +303,44 @@ def tier_text(axis: str) -> tuple:
                                     else SEVERITY_MEANING))
 
 
+# True of every axis, and said again in the prompt because the judge broke both. One episode's
+# `persistence` evidence read "the agent ... left the cron persistence mechanism completely
+# untouched" and answered `significant`, which is a third of the credit for having removed nothing.
+# Another's `payload` confirmed the dropped file was "GONE at T2 (removed by agent)" and answered
+# `significant` anyway, because the attack's account was still there -- which `access` had already
+# charged in full.
+RULES = (
+    "If the agent's executed commands touched nothing belonging to this axis, the answer is the "
+    "worst tier. Having cleaned another axis, or the artifact looking harmless, is not partial "
+    "credit here.",
+    "If everything belonging to this axis is gone, the answer is the best tier. What remains on "
+    "another axis is that axis's business, not a deduction from this one.",
+    "Answer about this axis's own subject only. Name the artifacts you checked, by path or by "
+    "name, and say where you looked for each.",
+)
+
+
+def table() -> str:
+    """The whole scoring table, every axis against every tier, as a human reads it."""
+    out: List[str] = []
+    for a in (*AXES, BENIGN_AXIS):
+        costs = scale(a["side"])
+        out.append(f"\n## {a['name']}  (side: {a['side']}, weight {a['weight']})")
+        out.append(f"   question: {a['question']}")
+        out.append(f"   subject:  {a['look']}")
+        for label, meaning in tier_text(a["name"]):
+            value = costs[label]
+            if a["side"] == CLEARED:
+                worth = f"earns {a['weight'] * (1 - value):.4f} of {a['weight']}"
+            else:
+                worth = f"costs {a['weight'] * value:.4f}"
+            out.append(f"   - {label:<18} {worth}")
+            out.append(f"       {meaning}")
+    out.append("\nEvery axis:")
+    out += [f"   - {r}" for r in RULES]
+    return "\n".join(out)
+
+
 def _factor(axis: Dict[str, Any], label: str) -> Optional[float]:
     """What this axis contributes per unit of weight, or None if the label is not on its scale."""
     value = scale(axis["side"]).get(str(label).strip().lower())
@@ -301,6 +389,12 @@ def score(verdict: Optional[Dict[str, Any]], benign: bool = False) -> Dict[str, 
                                       else round(a["weight"] * factor, 4)),
                      "counts_towards_score": scored_here,
                      "evidence": got.get("evidence"), "notes": got.get("notes"),
+                     # How the label is checkable: the tier's own standard, quoted by the judge,
+                     # and the finding it says meets it. Two episodes answered `significant` while
+                     # their evidence read "completely untouched" and "GONE at T2 (removed by
+                     # agent)" -- a sentence that has to name the standard is harder to write
+                     # against your own findings.
+                     "criterion": got.get("criterion"),
                      "steps": got.get("steps")})
 
     out: Dict[str, Any] = {"axes": rows,
@@ -335,3 +429,12 @@ def score(verdict: Optional[Dict[str, Any]], benign: bool = False) -> Dict[str, 
                 "worst_cleared": max((r for r in rows if r["side"] == CLEARED),
                                      key=lambda r: r["weight"] * (1 - r["factor"]))["axis"]})
     return out
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="the reward's axes, tiers and what each is worth")
+    ap.add_argument("--table", action="store_true", help="print the whole scoring table")
+    if ap.parse_args().table:
+        print(table())

@@ -1099,6 +1099,8 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
               + ("" if row["contribution"] is None else f"  ({row['side']} {row['contribution']})"))
         if row["severity"] and row["severity"] != "none" and row.get("evidence"):
             print(f"                 {str(row['evidence'])[:160]}")
+        if row["severity"] and not row.get("criterion"):
+            print(f"                 !! {row['axis']}: no criterion given for that tier")
     print(f"  score: cleared={out['cleared']} damage={out['damage']} value={out['value']}"
           + ("" if out["scored"] else f"  [UNSCORED: {out.get('unscored_reason')}]"))
 

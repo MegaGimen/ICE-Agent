@@ -59,9 +59,13 @@ def test_data_is_where_a_surviving_copy_lowers_the_tier() -> None:
     assert "no copy" in t["user_data"]
 
 
-def test_the_clearing_axes_keep_the_shared_four() -> None:
+def test_the_clearing_axes_have_their_own_four() -> None:
+    """They used to share one wording, and the judge read it loosely: see
+    tests/test_clearing_ruler.py."""
     for ax in rw.CLEARED_AXES:
-        assert rw.tier_text(ax) == rw.REMAINING_MEANING
+        tiers = dict(rw.tier_text(ax))
+        assert list(tiers) == [k for k, _ in rw.REMAINING_MEANING]   # same labels
+        assert tiers != dict(rw.REMAINING_MEANING)                   # own standards
 
 
 def test_the_judge_asks_per_axis_not_per_side() -> None:
