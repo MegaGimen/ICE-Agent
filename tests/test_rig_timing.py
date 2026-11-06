@@ -8,11 +8,18 @@ before T1 and the snapshot had the directory empty: the judge's file evidence sa
 held nothing at T0, T1 and T2 while the runtime table showed that same binary running at T1.
 Journal replay recovers metadata, not data that never left memory.
 
-And the half-stop interference polled the audit from the host every two seconds. That worked while
-each action cost a model round trip for the gate's ASK path; with no gate the actions are
-consecutive subprocess calls, so the poller arrived after the remediation was complete -- the
-episode asked to stop after 1 command, recorded `executed_before_stop: 2`, and came back with every
-clearing axis at `none`, which is not a half-remediated episode at all.
+And the half-stop interference was watched from outside the process. First the recorder polled the
+audit over ssh every two seconds; that worked while the gate's ASK path cost a model round trip per
+action. With no gate the actions are consecutive subprocess calls:
+
+  05:52:18.520  userdel butter                 exit 0
+  05:52:18.528  rm -f /etc/cron.d/persistevil  exit 0
+  05:52:18.536  rm -f /tmp/atomic_art.log      exit 0
+
+Eight milliseconds apart, three inside sixteen. A 50ms watcher inside the VM read the audit for the
+first time with all three already done and logged "stopping the daemon after 3 executed command(s)".
+Nothing outside the process can land between them -- grep alone costs more than 8ms -- so the
+process doing the executing counts them itself and exits where it stands.
 """
 from __future__ import annotations
 
@@ -29,15 +36,7 @@ VM = (ROOT / "ice" / "exercise" / "vm.py").read_text()
 REC = (ROOT / "ice" / "exercise" / "record.py").read_text()
 
 
-def _watcher_script(n: int = 1, limit: int = 600) -> str:
-    """Render exactly what the recorder sends into the VM."""
-    body = REC[REC.index("def arm_half_stop"):REC.index("def half_stop_outcome")]
-    ns = {"captured": []}
-    exec("import os\nSTATE='/root/ice-state'\n"
-         "def vsh(script, label='', check=False, timeout=0):\n    captured.append(script)\n"
-         + body, ns)
-    ns["arm_half_stop"](n, limit)
-    return ns["captured"][0]
+MCP = (ROOT / "ice" / "daemon" / "mcp_server.py").read_text()
 
 
 def test_the_guest_is_flushed_before_the_disk_is_frozen() -> None:
@@ -53,74 +52,45 @@ def test_a_failed_sync_is_said_out_loud() -> None:
     assert "sync failed" in body and "missing recent writes" in body
 
 
-def test_the_half_stop_watcher_runs_inside_the_machine() -> None:
-    script = _watcher_script()
-    assert "systemctl stop ice-daemon.service" in script
-    assert "sleep 0.05" in script                      # 50ms, not the old 2s poll
-    assert "setsid" in script                          # outlives the ssh session
-    assert "/root/ice-state/audit.jsonl" in script     # reads the audit where it is written
+def test_the_daemon_counts_its_own_executions() -> None:
+    body = MCP[MCP.index("def _stop_after_exec"):MCP.index("    # -- host_exec")]
+    assert 'os.environ.get("ICE_STOP_AFTER_EXEC"' in body
+    assert "os._exit(9)" in body                       # not a clean shutdown, see below
+    assert "_EXECUTED += 1" in body
 
 
-def test_it_counts_without_tripping_over_greps_exit_code() -> None:
-    """`grep -c` prints 0 and exits 1 when nothing matches, so a bare `|| echo 0` yields two lines
-    and every comparison then complains "integer expression expected"."""
-    script = _watcher_script()
-    assert "|| echo 0; } | head -1" in script
+def test_it_exits_hard_because_a_polite_stop_finishes_the_batch() -> None:
+    body = MCP[MCP.index("def _stop_after_exec"):MCP.index("    # -- host_exec")]
+    assert "finishes dispatching the actions it" in body
+    # and it leaves a marker in the audit, so the bundle can show the episode was cut off on purpose
+    assert 'rt.audit.write("stopped_after_exec"' in body
 
 
-def test_the_rendered_script_is_valid_bash() -> None:
-    script = _watcher_script()
-    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
-        fh.write(script)
-        path = fh.name
-    assert subprocess.run(["bash", "-n", path], capture_output=True).returncode == 0
+def test_it_is_called_right_after_the_execution_is_audited() -> None:
+    host_exec = MCP[MCP.index("    def host_exec("):MCP.index("        if verdict.decision is GateDecision.ASK")]
+    assert host_exec.index('audit.write("host_exec.executed"') < host_exec.index("_stop_after_exec(self.rt)")
+    assert host_exec.index("_stop_after_exec(self.rt)") < host_exec.index("return ToolResult")
 
 
-def test_the_watcher_stops_on_the_nth_command_within_a_tenth_of_a_second() -> None:
-    """Run the rendered watcher for real, against a fake audit, with systemctl replaced."""
-    with tempfile.TemporaryDirectory() as d:
-        dd = pathlib.Path(d)
-        audit, log = dd / "audit.jsonl", dd / "hs.log"
-        script = (_watcher_script(n=2, limit=30)
-                  .replace("/root/ice-state/audit.jsonl", str(audit))
-                  .replace("/root/ice-halfstop.log", str(log))
-                  .replace("systemctl stop ice-daemon.service", f"echo STOPPED >> {log}"))
-        inner = script[script.index("#!/bin/bash"):script.index("ICEHALFSTOP\nchmod")]
-        w = dd / "watch.sh"
-        w.write_text(inner)
-        w.chmod(0o755)
-        audit.write_text("")
-        log.write_text("")
-        proc = subprocess.Popen(["bash", str(w)], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        try:
-            time.sleep(0.4)
-            line = '{"event": "host_exec.executed", "command": "x"}\n'
-            with audit.open("a") as fh:                 # the first one must NOT stop it
-                fh.write(line)
-            time.sleep(0.3)
-            assert "STOPPED" not in log.read_text()
-            t0 = time.time()
-            with audit.open("a") as fh:                 # the second one must
-                fh.write(line)
-            for _ in range(60):
-                if "STOPPED" in log.read_text():
-                    break
-                time.sleep(0.02)
-            took = time.time() - t0
-            assert "STOPPED" in log.read_text(), "the watcher never stopped the daemon"
-            assert took < 0.5, f"took {took:.2f}s"
-            assert "after 2 executed command(s)" in log.read_text()
-            out, err = proc.communicate(timeout=5)
-            assert err.decode().strip() == "", err.decode()[:200]
-        finally:
-            proc.kill()
+def test_nothing_happens_without_the_knob() -> None:
+    """Read as text, like the other daemon checks here: the MCP dependency is not installed on
+    every machine that runs these tests, and this is a question about two lines of code."""
+    body = MCP[MCP.index("def _stop_after_exec"):MCP.index("    # -- host_exec")]
+    assert 'n = int(os.environ.get("ICE_STOP_AFTER_EXEC", "0") or 0)' in body
+    assert "if n <= 0:\n        return" in body
+    # and it only exits on the nth, not before
+    assert "if _EXECUTED < n:\n        return" in body
 
 
-def test_it_is_armed_before_the_agent_is_woken() -> None:
+def test_the_recorder_checks_the_episode_came_out_as_asked() -> None:
+    """A half-stop that did not bite produced two episodes that looked like clean remediations
+    (value 1.0, every clearing axis `none`) and nothing in the bundle said otherwise."""
+    body = REC[REC.index("def half_stop_outcome"):REC.index("def probe_exec")]
+    assert "stopped_after_exec" in body                # the daemon's own marker
+    assert '"as_asked": got == n and marked' in body
+    assert "not half-remediated as asked" in body
     run = REC[REC.index("def run_episode"):]
-    assert "arm_half_stop(STOP_AFTER_EXEC" in run
-    assert run.index("arm_half_stop(STOP_AFTER_EXEC") < run.index("wait_for_case(")
-    assert "half_stop_outcome()" in run
+    assert "half_stop_outcome(STOP_AFTER_EXEC)" in run
 
 
 if __name__ == "__main__":

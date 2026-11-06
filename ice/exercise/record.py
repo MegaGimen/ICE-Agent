@@ -111,54 +111,26 @@ def executed_in_vm() -> int:
         return 0
 
 
-def arm_half_stop(n: int, limit: float) -> None:
-    """Arm a watcher inside the VM that stops the daemon after its nth executed command.
+def half_stop_outcome(n: int) -> Dict[str, Any]:
+    """What the daemon's own stop-after-n did, read off the machine afterwards.
 
-    This is the cheapest way to produce a genuinely half-remediated episode: no injection, no
-    forging, and the audit is exactly true -- the agent really did run only those commands.
-
-    It used to poll from the host, every two seconds. That worked while each action cost a model
-    round trip for the gate's ASK path; with no gate the actions are consecutive subprocess calls,
-    tens of milliseconds apart, and the poller arrived after the remediation was already complete:
-    the half-stop episode asked for 1 command and recorded `executed_before_stop: 2` with every
-    clearing axis at `none`, which is not a half-remediated episode at all. So the watcher lives
-    where the audit is written and reads it every 50ms.
+    The recorder does not do the stopping any more. It polled the audit from the host, then from a
+    50ms watcher inside the VM, and neither can land between the agent's actions: with no gate they
+    are consecutive subprocess calls, and one episode's three landed inside 16 milliseconds. The
+    process doing the executing is the only thing that can count them, so ICE_STOP_AFTER_EXEC is
+    read there (mcp_server._stop_after_exec) and the daemon exits where it stands.
     """
-    script = (
-        "set -e\n"
-        "cat > /root/ice-halfstop.sh <<'ICEHALFSTOP'\n"
-        "#!/bin/bash\n"
-        f"audit={STATE}/audit.jsonl\n"
-        f"deadline=$(( $(date +%s) + {int(limit)} ))\n"
-        "while [ $(date +%s) -lt $deadline ]; do\n"
-        # grep -c prints 0 AND exits 1 when it matches nothing, so a bare `|| echo 0` yields two
-        # lines and every comparison complains "integer expression expected".
-        "  n=$( { grep -c '\"event\": \"host_exec.executed\"' \"$audit\" 2>/dev/null "
-        "|| echo 0; } | head -1 )\n"
-        f"  if [ \"$n\" -ge {int(n)} ]; then\n"
-        "    echo \"$(date -u +%FT%TZ) stopping the daemon after $n executed command(s)\" \\\n"
-        "      >> /root/ice-halfstop.log\n"
-        "    systemctl stop ice-daemon.service\n"
-        "    exit 0\n"
-        "  fi\n"
-        "  sleep 0.05\n"
-        "done\n"
-        "echo \"$(date -u +%FT%TZ) gave up; only $n executed\" >> /root/ice-halfstop.log\n"
-        "ICEHALFSTOP\n"
-        "chmod +x /root/ice-halfstop.sh\n"
-        "setsid /root/ice-halfstop.sh < /dev/null > /dev/null 2>&1 &\n"
-        "echo armed\n")
-    vsh(script, label=f"half-stop watcher (stop after {n})", check=True, timeout=60)
-
-
-def half_stop_outcome() -> Dict[str, Any]:
-    """What the watcher did, read back off the machine it did it on."""
-    p_ = vsh("cat /root/ice-halfstop.log 2>/dev/null || true", timeout=30)
-    line = (p_.stdout or "").strip().splitlines()[-1] if (p_.stdout or "").strip() else ""
     got = executed_in_vm()
-    print(f"  [probe] half-stop: {line or 'the watcher logged nothing'} "
-          f"(audit now shows {got} executed)")
-    return {"executed_before_stop": got, "watcher": line}
+    p_ = vsh(f"grep -c 'stopped_after_exec' {STATE}/audit.jsonl 2>/dev/null || true", timeout=30)
+    marked = (p_.stdout or "0").strip().splitlines()[-1:] == ["1"]
+    alive = vsh("systemctl is-active ice-daemon.service || true", timeout=30).stdout.strip()
+    print(f"  [probe] stop-after-{n}: {got} command(s) in the audit, "
+          f"daemon is {alive or 'gone'}{'' if marked else ', !! no stop marker'}")
+    if got != n or not marked:
+        print(f"  [probe] !! this episode is not half-remediated as asked "
+              f"(wanted {n}, audit shows {got}, marker {'present' if marked else 'absent'})")
+    return {"executed_before_stop": got, "stop_marker": marked, "daemon_after": alive,
+            "as_asked": got == n and marked}
 
 
 def probe_exec(commands: List[str]) -> List[Dict[str, Any]]:
@@ -1382,9 +1354,6 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         # cycle for a diff the recorder can take from outside.
         if t1_reading:
             hand_over_case(t0_reading, t1_reading)
-        if STOP_AFTER_EXEC:
-            # Armed before the agent is woken, because with no gate its commands land back to back.
-            arm_half_stop(STOP_AFTER_EXEC, INVESTIGATE_TIMEOUT + SETTLE_CAP)
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
         case = wait_for_case(arm["markers"], armed, live)
@@ -1395,7 +1364,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
             if STOP_AFTER_EXEC:
                 probe["stop_after_exec"] = STOP_AFTER_EXEC
                 probe["settled"] = wait_until_quiet()
-                probe.update(half_stop_outcome())
+                probe.update(half_stop_outcome(STOP_AFTER_EXEC))
             else:
                 probe["settled"] = wait_until_quiet()
         else:
