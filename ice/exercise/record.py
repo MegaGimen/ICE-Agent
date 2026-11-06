@@ -67,6 +67,14 @@ DAEMON_PY = os.environ.get("ICE_DAEMON_PY", "/root/ice-envs/daemon-env/bin/pytho
 
 INVESTIGATE_TIMEOUT = float(os.environ.get("ICE_RECORD_TIMEOUT", "900"))
 SETTLE_SECONDS = float(os.environ.get("ICE_RECORD_SETTLE", "60"))
+# How the recorder decides remediation is over. The fixed settle above was the whole budget for
+# approving and running everything the agent proposed, and with the gate's ASK path each action cost
+# a model round trip, so one episode ran 1 of 4 proposed actions inside the window and was scored as
+# an agent that did not clean up. With no gate (every action approved as it is made) the actions are
+# just subprocesses, so the recorder waits for the machine to go quiet instead of for a clock:
+# the audit's executed-command count has to stop growing for QUIET_SECONDS, capped at SETTLE_CAP.
+QUIET_SECONDS = float(os.environ.get("ICE_RECORD_QUIET", "20"))
+SETTLE_CAP = float(os.environ.get("ICE_RECORD_SETTLE_CAP", "420"))
 
 
 def vsh(script: str, label: str = "", check: bool = False,
@@ -337,6 +345,33 @@ def ensure_mcp_token() -> None:
         "ICETOKEN\n")
     p_ = vsh(script, label="mcp token", check=True, timeout=60)
     print(f"  [mcp token] {(p_.stdout or '').strip().splitlines()[-1] if p_.stdout else 'ok'}")
+
+
+def wait_until_quiet(quiet: float = QUIET_SECONDS, cap: float = SETTLE_CAP) -> Dict[str, Any]:
+    """Wait for the agent's remediation to finish, by watching the machine rather than a clock.
+
+    Returns what it waited for, which goes into the bundle: an episode scored on a remediation that
+    was cut off by the recorder is not a result about the agent, and the only way to see that in the
+    data afterwards is to record how the wait ended.
+    """
+    t0 = time.time()
+    last_count, last_change = executed_in_vm(), time.time()
+    print(f"  waiting for remediation to go quiet ({quiet:.0f}s of no new commands, cap {cap:.0f}s)")
+    while time.time() - t0 < cap:
+        time.sleep(5)
+        n = executed_in_vm()
+        if n != last_count:
+            print(f"  [settle] {n} command(s) executed so far")
+            last_count, last_change = n, time.time()
+            continue
+        if time.time() - last_change >= quiet:
+            took = time.time() - t0
+            print(f"  [settle] quiet for {quiet:.0f}s after {last_count} command(s); {took:.0f}s total")
+            return {"how": "quiet", "commands": last_count, "seconds": round(took, 1)}
+    print(f"  [settle] !! still running commands at the {cap:.0f}s cap "
+          f"({last_count} executed); the episode is cut off here")
+    return {"how": "cap", "commands": last_count, "seconds": round(time.time() - t0, 1),
+            "cut_off": True}
 
 
 def _mcp_port() -> int:
@@ -1285,8 +1320,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
                 probe["executed_before_stop"] = stop_when_half_done(STOP_AFTER_EXEC,
                                                                     SETTLE_SECONDS)
             else:
-                print(f"  settling {SETTLE_SECONDS:.0f}s for remediation + backward")
-                time.sleep(SETTLE_SECONDS)
+                probe["settled"] = wait_until_quiet()
         else:
             print("  NO case within timeout")
         if PROBE_EXEC:

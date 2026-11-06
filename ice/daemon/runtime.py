@@ -137,11 +137,18 @@ class Runtime:
         # (ice.exercise.record). The deterministic critical-asset floor above deliberately stays on: it
         # is static policy, not Kev's judgement, and it is what keeps the recording rig alive.
         record_mode = os.environ.get("ICE_RECORD_MODE") == "1"
+        # Recording: no gate at all. Not "the decision model does not veto" -- nothing vetoes, holds
+        # or delays. Every request is approved as it is made, irreversible and critical-asset
+        # commands included, because a recording of what the agent would do must not be a recording
+        # of what it was allowed to do. The deny list that used to stay on for the rig's sake is off
+        # too: the episode runs in a VM of its own, and the recorder reads the final disk on the
+        # host, so an agent that breaks its own machine costs the episode nothing.
         self.gate = SafetyGate(policy=policy,
-                               score_provider=None if record_mode else judge_score_provider)
+                               score_provider=None if record_mode else judge_score_provider,
+                               approve_on_request=record_mode)
         if record_mode:
-            log.warning("ICE_RECORD_MODE=1: Kev is not a safety-gate veto; actions are auto-approved "
-                        "and executed for real. Critical assets are still denied.")
+            log.warning("ICE_RECORD_MODE=1: no safety gate. Every action is approved on request and "
+                        "executed for real, including irreversible ones and critical assets.")
         self.approvals: Optional[ApprovalStore] = None
         # Request ids approved with no human. main.py's sweeper feeds them to
         # Orchestrator.on_approval, which is what actually runs the command.

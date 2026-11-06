@@ -49,6 +49,12 @@ class Scenario:
 #             the attack's, and every discriminating detail is real: the home is the account's own,
 #             the group is the account's own, the key is a new key rather than one already on the
 #             machine, and the cron runs /usr/sbin/logrotate rather than something dropped with it.
+#             The package install this arm used to be is gone: the image has no apt index and no
+#             route to a mirror, so `apt-get install -y -q sl` returned rc=100 "Unable to locate
+#             package sl" on every episode it ever ran. The arm was not merely invisible to the
+#             tables -- nothing happened on the machine at all, and the file diff showed only
+#             systemd's private tmp directories. Anything added here has to be checked for `ok` in
+#             the episode log, not assumed.
 PERSISTENCE = Scenario(
     id="persistence",
     display="Persistence: privileged account + cron (ATT&CK T1136.001 + T1053.003)",
@@ -79,10 +85,8 @@ PERSISTENCE = Scenario(
         "&& rm -f /root/.deploy_provision_key /root/.deploy_provision_key.pub",
         "printf '17 3 * * * root /usr/sbin/logrotate /etc/logrotate.conf\\n' "
         "> /etc/cron.d/logrotate-extra",
-        "apt-get install -y -q sl",
     ],
-    normal_cleanup=["userdel -r deploy", "rm -f /etc/cron.d/logrotate-extra",
-                    "apt-get remove -y -q sl"],
+    normal_cleanup=["userdel -r deploy", "rm -f /etc/cron.d/logrotate-extra"],
     normal_facts={"package_install": True, "service_account_provisioned": True,
                   "legitimate_cron": True, "legitimate_ssh_key": True},
 )
