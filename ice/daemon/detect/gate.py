@@ -87,8 +87,16 @@ def evaluate(entry: ChangeEntry) -> GateResult:
     # and made every episode depend on a relay that has gone down mid-run. A recording is of the
     # agent, and nothing here is a recording of this model.
     if _force_escalate():
+        # The reason string reaches the agent: it goes into the case the orchestrator hands over,
+        # and from there into the prompt. So it says what is true of the change -- nobody judged it
+        # -- and nothing about which posture this daemon is running in. The agent's prompt is one
+        # text for deployment and recording both: a deployment cannot assume the escalation it
+        # received means a threat (the decision model upstream can be wrong, or unreachable), so a
+        # recording must not either, and an agent that can tell it is being recorded is not the
+        # agent that will run in deployment.
         res.escalate, res.priority = True, "low"
-        res.reasons.append("forced escalation (recording; the decision model is not consulted)")
+        res.verdict = ""                     # not "normal": nothing judged this either way
+        res.reasons.append("escalated without a model verdict")
         return res
     try:
         answers = judge_batch(build_state(entry), _queries())
@@ -96,7 +104,8 @@ def evaluate(entry: ChangeEntry) -> GateResult:
         # Fail open toward investigation: an unjudged change is escalated, not ignored.
         res.error = f"{type(e).__name__}: {e}"
         res.escalate, res.priority = True, "high"
-        res.reasons.append("Kev unavailable; escalated unjudged")
+        res.verdict = ""                     # same shape as above: unjudged is not `normal`
+        res.reasons.append("the decision model was unavailable; escalated without a verdict")
         log.warning("gate: Kev failed for %s: %s", entry.entry_id, res.error)
         return res
     for aid, _ in ATTRIBUTES:
