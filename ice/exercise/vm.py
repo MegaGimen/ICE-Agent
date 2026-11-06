@@ -225,6 +225,16 @@ def snapshot_live(label: str, of: str) -> Path:
     while (OVERLAYS / f"{of}.g{gen}.qcow2").exists():
         gen += 1
     fresh = OVERLAYS / f"{of}.g{gen}.qcow2"
+    # Flush the guest's page cache first, or the snapshot is missing whatever it had not written
+    # yet. A benign episode downloaded a 1.9 MiB binary into /usr/local/bin seconds before T1, and
+    # the snapshot had the directory empty: the judge's file evidence said /usr/local/bin held
+    # nothing at T0, T1 and T2 while the runtime table showed that same binary running at T1.
+    # Journal replay recovers metadata, not data that never left memory. Crash-consistent is the
+    # point of a live snapshot; crash-consistent with a cold cache is not.
+    p_ = ssh(["sync"], check=False, label=of, timeout=120)
+    if p_.returncode != 0:
+        print(f"  [snapshot-live {label}] !! sync failed rc={p_.returncode}: "
+              f"{(p_.stderr or '').strip()[:120]} -- the image may be missing recent writes")
     _qmp(of, "blockdev-snapshot-sync", device=DISK_ID, **{"snapshot-file": str(fresh),
                                                           "format": "qcow2"})
     # The file qemu *was* writing to is now frozen: that is the snapshot, under its old name.
