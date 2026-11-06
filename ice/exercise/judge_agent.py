@@ -683,6 +683,29 @@ def _write_back(bundle: "Path", verdict: Dict[str, Any], scored: Dict[str, Any],
     print(f"  [write] {ep}: value {old.get('value')} -> {scored.get('value')}")
 
 
+def _arm_of_bundle(bundle) -> Tuple[bool, Optional[List[str]]]:
+    """Was this episode benign, and what did the operator place on the machine?
+
+    From the bundle first, because that is what was recorded; from the scenario definition for the
+    expected list when an older bundle does not carry it.
+    """
+    import json as _json
+    try:
+        meta = _json.loads((bundle / "episode.json").read_text())
+    except (OSError, ValueError):
+        return False, None
+    sc = meta.get("scenario") or {}
+    benign = bool(sc.get("benign")) or sc.get("arm") == "normal"
+    expected = sc.get("expected") or sc.get("normal_expected")
+    if benign and not expected:
+        try:
+            from ice.exercise.scenarios import SCENARIOS
+            expected = (SCENARIOS.get(str(sc.get("id"))) or SCENARIOS["persistence"]).normal_expected
+        except Exception:                                   # noqa: BLE001
+            expected = None
+    return benign, expected
+
+
 def main() -> None:
     import argparse
     ap = argparse.ArgumentParser(description="score one episode's machine, axis by axis")
@@ -717,14 +740,21 @@ def main() -> None:
         commands = [{"command": c, "returncode": 0} for c in a.command]
         refused = []
     runtime = None
+    benign, expected = False, None
     if bundle:
         from ice.exercise import record
         # The snapshots are read from the bundle by their own order, not from a case's pointers:
         # a benign episode has no case at all, and the pointers were wrong once besides.
         runtime = record._osquery_snapshots(bundle)
+        # And the arm, because a benign episode is judged on different axes. Re-judging one without
+        # this ran the four clearing axes on a machine nobody had attacked and wrote the result back
+        # over a correct score: there is nothing to clear, so they answer `none`, and `none` on a
+        # clearing axis is full credit.
+        benign, expected = _arm_of_bundle(bundle)
     try:
         verdict = judge(a.t0, a.t1, a.t2, commands, refused, runtime=runtime, axes=tuple(a.axis),
-                        hash_check=a.hash_check, verbose=not a.quiet)
+                        hash_check=a.hash_check, benign=benign, expected=expected,
+                        verbose=not a.quiet)
         for run in verdict["runs"].values():
             run.pop("transcript", None)
         print(json.dumps({"axes": verdict["axes"], "usage": verdict["usage"],
@@ -736,7 +766,7 @@ def main() -> None:
             for r in reads:
                 print(f"!! {ax} read the product's own state: {r['tool']} {r['path']} "
                       f"(removed {r.get('redacted_fields') or 'nothing'})")
-        scored = rw.score(verdict)
+        scored = rw.score(verdict, benign=benign)
         print(json.dumps(scored, indent=1, ensure_ascii=False))
         if a.write and bundle:
             _write_back(bundle, verdict, scored, tuple(a.axis))

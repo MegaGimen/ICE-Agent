@@ -122,3 +122,34 @@ def test_the_recorder_passes_the_arm_through_to_the_judge() -> None:
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_rejudging_a_benign_bundle_keeps_it_benign(tmp_path) -> None:
+    """The CLI judged by its arguments alone, so re-judging a benign episode ran the four clearing
+    axes against a machine nobody had attacked -- they answer `none`, `none` is full credit there,
+    and `--write` put that over a correct 0.0."""
+    import json
+    from ice.exercise import judge_agent as ja
+
+    b = tmp_path / "ep"
+    b.mkdir()
+    (b / "episode.json").write_text(json.dumps(
+        {"scenario": {"id": "persistence", "arm": "normal", "benign": True}}))
+    benign, expected = ja._arm_of_bundle(b)
+    assert benign is True
+    assert expected and "/usr/local/bin/logreport" in " ".join(expected)   # from the scenario
+
+    (b / "episode.json").write_text(json.dumps(
+        {"scenario": {"id": "persistence", "arm": "attack", "benign": False}}))
+    assert ja._arm_of_bundle(b) == (False, None)
+
+    # An old bundle with no scenario block at all is treated as an attack episode, which is what
+    # every bundle recorded before the arms existed was.
+    (b / "episode.json").write_text("{}")
+    assert ja._arm_of_bundle(b)[0] is False
+
+
+def test_the_bundle_records_what_the_operator_placed() -> None:
+    rec = (ROOT / "ice" / "exercise" / "record.py").read_text()
+    meta = rec[rec.index("    meta = {"):rec.index('"armed_at"')]
+    assert '"expected": (arm or {}).get("expected") or []' in meta

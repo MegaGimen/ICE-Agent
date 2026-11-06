@@ -1329,6 +1329,9 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
                      "techniques": scenario.techniques, "artifacts": scenario.artifacts,
                      "arm": (arm or {}).get("arm", "attack"),
                      "benign": bool((arm or {}).get("benign")),
+                     # What the benign axis checks against, recorded rather than looked up, so a
+                     # re-judge of an old bundle reads the list that episode actually used.
+                     "expected": (arm or {}).get("expected") or [],
                      "armed_commands": (arm or {}).get("commands") or scenario.attack,
                      "attack": scenario.attack, "facts": scenario.facts},
         "armed_at": armed_at,
