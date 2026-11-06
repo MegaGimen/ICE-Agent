@@ -82,6 +82,20 @@ def test_nothing_happens_without_the_knob() -> None:
     assert "if _EXECUTED < n:\n        return" in body
 
 
+def test_the_knob_reaches_the_daemon_that_is_already_running() -> None:
+    """The daemon reads /root/ice-posture.env, written into the image at prepare time, so a knob set
+    per episode in the recorder's own environment never reached it: ICE_STOP_AFTER_EXEC=1 was read
+    as 0 inside the VM, the daemon ran everything the agent proposed, and the episode scored a clean
+    1.0 with only `as_asked: false` to show for it."""
+    body = REC[REC.index("def push_interference"):REC.index("def arm_of")]
+    assert "/root/ice-posture.env" in body
+    assert "systemctl restart ice-daemon.service" in body
+    assert "if not knobs:\n        return {}" in body          # an ordinary episode is untouched
+    assert "did not come back" in body                          # and a restart that failed is loud
+    boot = REC[REC.index("def boot_target"):REC.index("def push_interference")]
+    assert "push_interference()" in boot
+
+
 def test_the_recorder_checks_the_episode_came_out_as_asked() -> None:
     """A half-stop that did not bite produced two episodes that looked like clean remediations
     (value 1.0, every clearing axis `none`) and nothing in the bundle said otherwise."""

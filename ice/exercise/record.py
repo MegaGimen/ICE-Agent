@@ -572,6 +572,7 @@ def boot_target(episode: str) -> Dict[str, str]:
     if vsh("systemctl is-active ice-daemon.service", timeout=60).stdout.strip() != "active":
         raise RuntimeError("the daemon did not come up with the machine; re-run "
                            "`record.py prepare` to put it in the image")
+    push_interference()
     print("  the daemon came up with the machine")
     return {"baseline": vm.BASE_LABEL, "live": live}
 
@@ -617,6 +618,42 @@ def serve_tool(path: Path) -> Tuple[str, Any]:
     url = f"http://10.0.2.2:{port}/{path.name}"
     print(f"  [serve] {path.name} ({path.stat().st_size // 1024} KiB) at {url}")
     return url, httpd
+
+
+def push_interference() -> Dict[str, str]:
+    """Hand this episode's interference knobs to the daemon, which has already started.
+
+    The daemon reads /root/ice-posture.env, and that file is written into the golden image at
+    prepare time -- so a knob set per episode, in the recorder's own environment, never reached it.
+    ICE_STOP_AFTER_EXEC=1 was therefore read as 0 inside the VM: the daemon ran everything the
+    agent proposed, the episode scored a clean 1.0, and only `as_asked: false` in the bundle said
+    that what was asked for had not happened.
+
+    Nothing is restarted unless there is something to add, so an ordinary episode's daemon is the
+    one the image booted.
+    """
+    knobs = {k: v for k, v in (("ICE_STOP_AFTER_EXEC", str(STOP_AFTER_EXEC) if STOP_AFTER_EXEC else ""),)
+             if v}
+    if not knobs:
+        return {}
+    body = "".join(f"{k}={json.dumps(v)}\n" for k, v in sorted(knobs.items()))
+    vsh("grep -v '^ICE_STOP_AFTER_EXEC=' /root/ice-posture.env > /root/ice-posture.env.new "
+        "|| true\n"
+        f"cat >> /root/ice-posture.env.new <<'ICEKNOBS'\n{body}ICEKNOBS\n"
+        "mv /root/ice-posture.env.new /root/ice-posture.env\n"
+        "chmod 600 /root/ice-posture.env\n"
+        "systemctl restart ice-daemon.service\n",
+        label=f"interference: {', '.join(f'{k}={v}' for k, v in sorted(knobs.items()))}",
+        check=True, timeout=120)
+    for _ in range(30):
+        if vsh("systemctl is-active ice-daemon.service", timeout=30).stdout.strip() == "active":
+            got = vsh("grep -c ICE_STOP_AFTER_EXEC /root/ice-posture.env || true",
+                      timeout=30).stdout.strip().splitlines()[-1:]
+            print(f"  [interference] daemon restarted with the knobs ({got[0] if got else '?'} in "
+                  f"the posture file)")
+            return knobs
+        time.sleep(2)
+    raise RuntimeError("the daemon did not come back after the interference knobs were pushed")
 
 
 def arm_of(scenario: Scenario) -> Dict[str, Any]:
