@@ -208,7 +208,10 @@ def test_each_axis_is_told_how_to_investigate_without_being_fenced_in() -> None:
 def test_each_axis_is_asked_its_own_question_on_its_own_scale() -> None:
     """One run per axis. A run that was handed all seven could answer six from memory, and the
     151,571-prompt-token conversation that produced one episode's verdict was a single loop."""
-    for name, axis in reward.AXIS.items():
+    # The seven an attack episode is judged on. The benign arm's own axis is checked separately,
+    # in tests/test_benign_axis.py: it is not asked on an attack episode at all.
+    for axis in reward.AXES:
+        name = axis["name"]
         text = _prompt_text(name)
         assert axis["question"] in text, name
         assert f'"axis": "{name}"' in text
@@ -292,8 +295,8 @@ def test_all_seven_axes_run_and_the_score_comes_from_them() -> None:
         judge_agent.image.named_diffs = real_diffs
 
     assert answered == [a["name"] for a in reward.AXES]
-    assert set(verdict["axes"]) == set(reward.AXIS)
-    assert all(verdict["runs"][n].get("transcript") for n in reward.AXIS)
+    assert set(verdict["axes"]) == {a["name"] for a in reward.AXES}
+    assert all(verdict["runs"][a["name"]].get("transcript") for a in reward.AXES)
     # Seven short runs rather than one long one: the token cost is reported as the sum of them.
     assert verdict["usage"]["prompt_tokens"] == 700
     scored = reward.score(verdict)
@@ -425,15 +428,15 @@ def test_the_cross_check_does_not_read_silence_as_a_clean_answer() -> None:
              "footprint": {}, "cleared": [], "not_cleared": {},
              "collateral": {"/etc/legal": "removed", "/home/u/.bashrc": "removed"},
              "side_effects": []}
-    failed = {"axes": {n: ({"severity": "none"} if n in reward.CLEARED_AXES
-                           else {"error": "HTTP 502: "}) for n in reward.AXIS}}
+    failed = {"axes": {a["name"]: ({"severity": "none"} if a["side"] == reward.CLEARED
+                                   else {"error": "HTTP 502: "}) for a in reward.AXES}}
     out = sr.disagreements(files, failed)
     assert out["unanswered_axes"] == sorted(reward.DAMAGE_AXES)
     assert not any("while every damage axis was answered" in n for n in out["disagreements"])
     assert any("did not answer" in n for n in out["disagreements"])
 
     # When they do answer `none` and the arithmetic sees collateral, that is a real disagreement.
-    answered = {"axes": {n: {"severity": "none"} for n in reward.AXIS}}
+    answered = {"axes": {a["name"]: {"severity": "none"} for a in reward.AXES}}
     out = sr.disagreements(files, answered)
     assert out["unanswered_axes"] == []
     assert any("/etc/legal" in n for n in out["disagreements"])

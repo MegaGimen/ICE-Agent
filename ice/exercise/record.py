@@ -47,7 +47,7 @@ import traceback
 import time
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ice.exercise.scenarios import SCENARIOS, Scenario
 
@@ -553,6 +553,38 @@ def boot_target(episode: str) -> Dict[str, str]:
 # is nothing to clear and nothing was broken. It asks whether the judge invents findings when there
 # is nothing there, and whether an agent that "remediates" a legitimate package is charged for it.
 ARM = os.environ.get("ICE_SCENARIO_ARM", "attack")
+# The benign arm's tool, built by ice/exercise/build_benign.sh into ICE_RIG_DIR.
+TOOL = os.environ.get("ICE_BENIGN_TOOL", "logreport")
+
+
+def serve_tool(path: Path) -> Tuple[str, Any]:
+    """Serve one file to the VM for the length of the arm, and say where to get it.
+
+    The benign arm downloads an ops tool rather than having it appear on the disk, because where an
+    unknown executable came from is part of what the agent has to work out -- and a download leaves
+    the same trail an attacker's would. qemu's user networking puts the host at 10.0.2.2 from inside
+    the machine, and a connection there lands on the host's loopback, so a loopback server is all
+    this needs. It is shut down the moment the arm is done: an HTTP server of the recorder's own has
+    no business being in the episode's runtime tables.
+    """
+    import functools
+    import http.server
+    import socket
+    import threading
+
+    if not path.exists():
+        raise RuntimeError(f"the benign arm's tool is not built: {path} "
+                           f"(run ice/exercise/build_benign.sh)")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(path.parent))
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
+    httpd.log_message = lambda *a, **k: None          # type: ignore[assignment]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    url = f"http://10.0.2.2:{port}/{path.name}"
+    print(f"  [serve] {path.name} ({path.stat().st_size // 1024} KiB) at {url}")
+    return url, httpd
 
 
 def arm_of(scenario: Scenario) -> Dict[str, Any]:
@@ -565,6 +597,7 @@ def arm_of(scenario: Scenario) -> Dict[str, Any]:
         # No markers: there is no artifact to find a case by, and any investigated case is the
         # thing being measured rather than the thing being looked for.
         return {"arm": "normal", "commands": scenario.normal, "benign": True,
+                "expected": scenario.normal_expected,
                 "markers": [], "facts": scenario.normal_facts}
     return {"arm": "attack", "commands": scenario.attack, "benign": False,
             "markers": scenario.markers, "facts": scenario.facts}
@@ -976,6 +1009,8 @@ def _score(ep_dir: Path, case: Optional[Dict[str, Any]], images: Dict[str, str],
           f"{sorted(k for k, v in runtime.items() if v) or 'none'}")
 
     verdict = judge_agent.judge(base, armed, final, commands, refused, runtime=runtime,
+                                benign=bool((arm or {}).get("benign")),
+                                expected=(arm or {}).get("expected"),
                                 verbose=True)
     transcripts = {name: run.pop("transcript", None) for name, run in verdict["runs"].items()}
     (ep_dir / "image-judgement.json").write_text(json.dumps(verdict, ensure_ascii=False, indent=1))
@@ -1292,8 +1327,17 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         print(f"=== arm {scenario.id}/{arm['arm']} "
               f"({'; '.join(arm['commands'])[:100]}) ===")
         armed = time.time()
-        for c in arm["commands"]:
-            vsh(c, arm["arm"])
+        server = None
+        if any("{tool_url}" in c for c in arm["commands"]):
+            url, server = serve_tool(Path(os.environ.get("ICE_RIG_DIR", "/root/ice-rig")) / TOOL)
+            arm["commands"] = [c.replace("{tool_url}", url) for c in arm["commands"]]
+        try:
+            for c in arm["commands"]:
+                vsh(c, arm["arm"])
+        finally:
+            if server is not None:
+                server.shutdown()
+                print("  [serve] stopped")
 
         # T1 is taken from the running machine. Shutting down for it cost more than the 17 seconds:
         # the reboot between the attack and the investigation destroyed the attack's runtime state,

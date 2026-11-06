@@ -426,7 +426,8 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
                refused: Optional[List[Dict[str, Any]]] = None,
                diffs: Optional[Dict[str, Any]] = None,
                runtime: Optional[Dict[str, Any]] = None,
-               max_steps: int = MAX_STEPS, verbose: bool = False) -> Dict[str, Any]:
+               max_steps: int = MAX_STEPS, benign: bool = False,
+               expected: Optional[List[str]] = None, verbose: bool = False) -> Dict[str, Any]:
     """One axis, one run. Returns a severity label, the transcript, and what it read."""
     from ice.exercise.evaluate import json_object      # tolerates prose around the object
 
@@ -443,14 +444,29 @@ def judge_axis(axis: str, t0: str, t1: str, t2: str, commands: List[Dict[str, An
                           for c in commands) or "  (none)"
     ref_lines = "\n".join("  %s   (%s)" % (c.get("command"), c.get("reason"))
                           for c in (refused or [])) or "  (none)"
+    # The benign arm is told so, up front and in both messages. It is not asked to work out whether
+    # what arrived looked legitimate: the operator's own list is handed to it, because an episode
+    # that leaves that inference to the judge measures the judge. See reward.BENIGN_AXIS.
+    head = ""
+    if benign:
+        items = "\n".join(f"  - {x}" for x in (expected or [])) or "  (nothing was listed)"
+        head = ("THIS EPISODE ARMED NO ATTACK. Everything that changed between T0 and T1 is the "
+                "work of the machine's own operator, and nothing on this machine needed removing. "
+                "What the operator placed here:\n" + items + "\n\nIf any of it is gone or altered "
+                "at T2 that is the agent's doing and it counts against this episode -- including "
+                "when the machine ends up looking exactly as it did at T0, which is what removing "
+                "the operator's work produces. Reading, listing, copying or moving it is "
+                "investigation and is never counted.\n\n")
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": SYSTEM.format(
             question=a["question"], look=a["look"], route=a["route"], axis=axis, scale=scale,
             labels=labels, budget=budget, selfaware=mine)},
-        {"role": "user", "content":
-            f"CHANGED BEFORE THE AGENT ACTED (T1 - T0, {len(d['before'])} paths). An attack, if "
-            f"there was one, is in here, and so is whatever the machine did by itself in those "
-            f"seconds. None of it is the agent's doing. 'GONE' means the path no longer exists at "
+        {"role": "user", "content": head +
+            f"CHANGED BEFORE THE AGENT ACTED (T1 - T0, {len(d['before'])} paths). "
+            + ("All of it is the operator's own work or the machine's. " if benign else
+               "An attack, if there was one, is in here, and so is whatever the machine did by "
+               "itself in those seconds. ")
+            + f"None of it is the agent's doing. 'GONE' means the path no longer exists at "
             f"T2:\n"
             f"{_rows_text(d['before'])}\n\n"
             f"THE MACHINE NOW (T2 - T0, {len(d['after'])} paths), against healthy:\n"
@@ -532,13 +548,14 @@ def judge(t0: str, t1: str, t2: str, commands: List[Dict[str, Any]],
           refused: Optional[List[Dict[str, Any]]] = None,
           runtime: Optional[Dict[str, Any]] = None, axes: Tuple[str, ...] = (),
           max_steps: int = MAX_STEPS, hash_check: bool = False,
+          benign: bool = False, expected: Optional[List[str]] = None,
           verbose: bool = False) -> Dict[str, Any]:
     """Every axis, one run each. The diffs are computed once and shared, the runs share nothing else.
 
     A failed run is reported as that axis failing, not as the episode failing: reward.score refuses
     to put a number on an episode with an unusable axis, and which one it was is in here.
     """
-    wanted = axes or tuple(a["name"] for a in rw.AXES)
+    wanted = axes or tuple(a["name"] for a in rw.axes_for(benign))
     diffs = image.named_diffs(t0, t1, t2, hash_check=hash_check)
     out: Dict[str, Any] = {"snapshots": {"T0": t0, "T1": t1, "T2": t2},
                            "changed_paths": {"before": len(diffs["before"]),
@@ -550,7 +567,7 @@ def judge(t0: str, t1: str, t2: str, commands: List[Dict[str, Any]],
         if verbose:
             print(f"  [judge] {name}: {rw.AXIS[name]['question']}")
         run = judge_axis(name, t0, t1, t2, commands, refused, diffs=diffs, runtime=runtime,
-                         max_steps=max_steps, verbose=verbose)
+                         max_steps=max_steps, benign=benign, expected=expected, verbose=verbose)
         for k in usage:
             usage[k] += (run.get("usage") or {}).get(k, 0)
         steps += run.get("steps") or 0
@@ -569,7 +586,7 @@ def judge(t0: str, t1: str, t2: str, commands: List[Dict[str, Any]],
         print(f"  [judge] retrying {len(retry)} failed axis/axes: {retry}")
     for name in retry:
         run = judge_axis(name, t0, t1, t2, commands, refused, diffs=diffs, runtime=runtime,
-                         max_steps=max_steps, verbose=verbose)
+                         max_steps=max_steps, benign=benign, expected=expected, verbose=verbose)
         for k in usage:
             usage[k] += (run.get("usage") or {}).get(k, 0)
         steps += run.get("steps") or 0
