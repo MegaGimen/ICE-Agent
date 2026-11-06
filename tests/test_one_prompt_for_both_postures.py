@@ -2,17 +2,18 @@
 
     python3 -m pytest tests/test_one_prompt_for_both_postures.py
 
-A deployment cannot assume that the escalation it received means a threat -- the decision model
-upstream can be wrong, or unreachable -- so a recording must not assume it either. And an agent that
-can tell it is being recorded is not the agent that will run in deployment.
-
-What was wrong: the forced-escalation path put
+An agent that can tell it is being recorded is not the agent that will run in deployment. The
+forced-escalation path put
 
     "reasons": ["forced escalation (recording; the decision model is not consulted)"]
 
-into the case, which the orchestrator hands over and the prompt renders verbatim. It told the agent
-it was in a recording. The same entries also carried `"verdict": "normal"` from the dataclass
-default, which asserts a judgement that nothing had made.
+into the case, which the orchestrator hands over and the prompt rendered verbatim.
+
+And the whole envelope was the wrong thing to show in either posture. The detection model is a
+filter on what is worth looking at; an agent that reads its verdict, its attribute scores or its
+priority takes confidence from it, in whichever direction it points -- including from the mere fact
+that it answered. So the prompt carries the flagged changes and nothing else about how they were
+flagged: not the verdict, not the scores, not the word for the act of flagging them.
 """
 from __future__ import annotations
 
@@ -56,37 +57,39 @@ def test_nothing_the_agent_reads_names_the_posture() -> None:
         assert word.lower() not in low, word
 
 
-def test_an_unjudged_change_is_not_reported_as_normal() -> None:
-    """`verdict: "normal"` is a judgement. Nothing judged this, so the field is empty and the
-    reason says what actually happened."""
+def test_the_detection_envelope_never_reaches_the_agent() -> None:
+    """The gate still records its own result -- the case file and the audit keep it -- but none of
+    it is rendered: no verdict, no attribute scores, no priority, no reasons, and not the word for
+    the act of flagging."""
     r = _forced()
-    assert r["escalate"] is True
-    assert r["verdict"] == ""
-    assert r["attributes"] == {} and r["verdict_probs"] == {}
-    assert r["reasons"] == ["escalated without a model verdict"]
-    assert all("recording" not in x for x in r["reasons"])
+    assert r["escalate"] is True and "reasons" in r      # still produced, for the record
+    text = prompts.wake_message("case-1", "ice-target", [r])
+    low = text.lower()
+    for leak in ("escalat", "verdict_probs", "priority", '"attributes"', "verdict\":"):
+        assert leak.lower() not in low, leak
+    # What is rendered is the change itself, under a name that says what it is.
+    assert '"suspicious_changes"' in text
+    assert "/etc/cron.d/logreport#bc17" in text
+    assert "logreport --once --quiet" in text            # the untrusted field, as data
 
 
-def test_the_model_being_down_reads_the_same_way() -> None:
-    """The deployment case with no verdict: the gate fails open toward investigation and says so in
-    the same shape, so the agent cannot tell the two situations apart by their wording. (Code
-    comments may say which posture a branch is for; the agent never reads code.)"""
-    src = (Path(__file__).resolve().parents[1] / "ice" / "daemon" / "detect" / "gate.py").read_text()
-    body = src[src.index("def evaluate("):src.index("def evaluate_many(")]
-    assert body.count('res.verdict = ""') == 2            # forced, and model-unavailable
-    reasons = [ln for ln in body.splitlines() if "res.reasons.append(" in ln]
-    assert len(reasons) >= 2
-    for ln in reasons:
-        for word in POSTURE_WORDS:
-            assert word.lower() not in ln.lower(), ln
+def test_the_prompt_says_nothing_about_the_detection_model() -> None:
+    """Not its verdict, not its scores, and not whether it was available: ICE's eyes are that model,
+    so there is no version of this prompt in which the agent should be reasoning about it."""
+    text = prompts.wake_message("case-1", "ice-target", [_forced()],
+                                state_diff={"cron": "cron: 1 row(s) now\n+ /etc/cron.d/logreport"})
+    low = text.lower()
+    for phrase in ("decision model", "detection gate", "unavailable", "unjudged", "no model",
+                   "model judgement", "kev"):
+        assert phrase not in low, phrase
 
 
-def test_the_prompt_says_escalation_is_not_a_verdict() -> None:
+def test_the_flag_is_offered_as_a_filter_not_as_a_finding() -> None:
     text = prompts.wake_message("case-1", "ice-target", [_forced()])
-    assert "Escalation is not a verdict" in text
-    assert "that decision is yours" in text
-    # and the source line no longer reads as a finding
-    assert "not a judgement that it is a threat" in text
+    assert "not a finding" in text
+    assert "decided that it is harmless either" in text   # neither direction is given to it
+    assert "That decision is yours" in text
+    assert "`assessment` field" in text
 
 
 def test_a_benign_assessment_means_no_actions() -> None:
