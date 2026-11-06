@@ -66,6 +66,44 @@ BUDGET_EXHAUSTED = ("Investigation tool budget for this case is used up. Do not 
                     "case JSON now from the evidence you have, marking anything unverified as unknown.")
 
 
+_EXECUTED = 0
+
+
+def _stop_after_exec(rt) -> None:
+    """Dataset recording only: die after the nth executed command, where it stands.
+
+    `ICE_STOP_AFTER_EXEC=n` makes an episode that is genuinely half-remediated -- nothing is forged
+    and the audit is exactly true, the agent really did run only those commands and its other
+    proposals are in the trajectory unrun. What is being tested is whether the clearing axes notice
+    what is still on the machine.
+
+    It has to be here, counted by the process doing the executing. The recorder used to poll the
+    audit from outside and stop the service; that worked while the gate's ASK path cost a model
+    round trip per action, but with no gate the actions are 8 milliseconds apart -- one episode's
+    three landed inside 16ms -- and nothing watching from outside can land between them. A 50ms
+    watcher inside the VM was no better for the same reason.
+
+    os._exit, not a clean shutdown: a daemon that stops politely finishes dispatching the actions it
+    already has, which is the thing being prevented.
+    """
+    global _EXECUTED
+    n = int(os.environ.get("ICE_STOP_AFTER_EXEC", "0") or 0)
+    if n <= 0:
+        return
+    _EXECUTED += 1
+    if _EXECUTED < n:
+        return
+    log.warning("ICE_STOP_AFTER_EXEC=%d: %d command(s) executed; stopping the daemon where it "
+                "stands (recording)", n, _EXECUTED)
+    try:
+        rt.audit.write("stopped_after_exec", executed=_EXECUTED, requested=n)
+    except Exception:  # noqa: BLE001 - the exit matters more than the record of it
+        pass
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(9)
+
+
 class IceTools:
     def __init__(self, rt: Runtime):
         self.rt = rt
@@ -136,44 +174,6 @@ class IceTools:
             return ToolResult(True, TOOL_GRAPH_QUERY, content=_wrap(trimmed.pop("rows"), **trimmed))
         except Exception as e:  # noqa: BLE001
             return ToolResult(False, TOOL_GRAPH_QUERY, error=str(e))
-
-_EXECUTED = 0
-
-
-def _stop_after_exec(rt) -> None:
-    """Dataset recording only: die after the nth executed command, where it stands.
-
-    `ICE_STOP_AFTER_EXEC=n` makes an episode that is genuinely half-remediated -- nothing is forged
-    and the audit is exactly true, the agent really did run only those commands and its other
-    proposals are in the trajectory unrun. What is being tested is whether the clearing axes notice
-    what is still on the machine.
-
-    It has to be here, counted by the process doing the executing. The recorder used to poll the
-    audit from outside and stop the service; that worked while the gate's ASK path cost a model
-    round trip per action, but with no gate the actions are 8 milliseconds apart -- one episode's
-    three landed inside 16ms -- and nothing watching from outside can land between them. A 50ms
-    watcher inside the VM was no better for the same reason.
-
-    os._exit, not a clean shutdown: a daemon that stops politely finishes dispatching the actions it
-    already has, which is the thing being prevented.
-    """
-    global _EXECUTED
-    n = int(os.environ.get("ICE_STOP_AFTER_EXEC", "0") or 0)
-    if n <= 0:
-        return
-    _EXECUTED += 1
-    if _EXECUTED < n:
-        return
-    log.warning("ICE_STOP_AFTER_EXEC=%d: %d command(s) executed; stopping the daemon where it "
-                "stands (recording)", n, _EXECUTED)
-    try:
-        rt.audit.write("stopped_after_exec", executed=_EXECUTED, requested=n)
-    except Exception:  # noqa: BLE001 - the exit matters more than the record of it
-        pass
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(9)
-
 
     # -- host_exec ----------------------------------------------------------
     def host_exec(self, command: str, intent: str) -> ToolResult:
