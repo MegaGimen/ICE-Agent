@@ -1,0 +1,18 @@
+[Unit]
+Description=ICE/ART recorder read-only web view (llinker.com/ICE)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/ICE-Agent
+Environment=ICE_WEB_PORT=8139
+Environment=ICE_WEB_DATASET=/home/ICE-Agent/dataset
+Environment=ICE_BOX=root@220.86.159.73
+Environment=ICE_BOX_PORT=21530
+ExecStart=/usr/bin/python3 -m ice.exercise.webstatus
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
