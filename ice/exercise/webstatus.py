@@ -133,7 +133,7 @@ def _summary(ep: dict, name: str) -> dict:
         "cleared": r.get("cleared"), "damage": r.get("damage"),
         "worst_cleared": r.get("worst_cleared"), "worst_damage": r.get("worst_damage"),
         "grade_miss": g.get("miss"), "detected": g.get("detected"), "verdict": g.get("verdict"),
-        "recorded_at": ep.get("recorded_at") or "",
+        "recorded_at": str(ep.get("recorded_at") or ""),
         "scenario": ep.get("scenario") or "",
     }
 
@@ -264,6 +264,18 @@ let BUNDLES=[], FILTER='all', SEL=null;
 
 async function j(u){const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json();}
 
+function phaseOf(s){
+ if(s.stopped)return['已停止 / stopped','stop','批次因 API/额度错误停止了'];
+ if(s.finished)return['已完成 / finished','','整批 423 条跑完了'];
+ if(!s.running)return['未运行 / not running','stop','批次进程不在跑'];
+ const t=(s.t1_tail||'').toLowerCase();
+ if(/value=|grade=/.test(t))return['评分完成 / scored','run','这条打完分了,正切到下一条'];
+ if(/waiting.*investigation|escalation \+ investigation/.test(t))return['Agent 调查中 / investigating','run','攻击已就位,调查 agent 正在排查并清理(最多 ~15 分钟)'];
+ if(/hand.?over|reading t1|snapshotting|snapshot-live/.test(t))return['拍快照·移交 / handing over','run','攻击已执行,正在冻结 T1 快照、把案子交给 agent'];
+ if(s.arm_tail)return['执行攻击中 / arming','run','正在 VM 里跑这条 ATT&CK 技术的命令(含前置下载/编译)'];
+ return['启动 VM / booting','run','正在开机并读取 T0 干净基线'];
+}
+
 async function status(){
  try{const s=await j('api/status');
   const st=$('#state');
@@ -275,11 +287,16 @@ async function status(){
   $('#pbar').style.width=(s.index/(s.total||423)*100)+'%';
   $('#tally').textContent=`scored ${s.done} · empty ${s.empty} · skip ${s.skip}`;
   $('#upd').textContent='box '+(s.ok?('@'+(s.updated||'')):'UNREACHABLE');
+  const [ph,cls,desc]=phaseOf(s);
+  const pos=(s.pos||'').replace(/^#+\s*/,'');
+  const tm=pos.match(/\]\s+(\S+)\s+([0-9a-f-]{8,})/);
   const live=$('#live');live.innerHTML='';
-  live.append(E('div','',`<span class="k">now:</span> ${esc((s.pos||'').replace(/^#+\s*/,''))||'—'}`));
+  live.append(E('div','',`<span class="pill ${cls}">${esc(ph)}</span> <b>${tm?esc(tm[1]):'—'}</b> <span class="muted">${tm?esc(tm[2].slice(0,8)):''}</span>`));
+  live.append(E('div','muted',esc(desc)));
   if(s.stop)live.append(E('div','err','STOP: '+esc(s.stop)));
-  if(s.arm_tail){live.append(E('div','k','arm:'));const a=E('div','tail');a.textContent=s.arm_tail;live.append(a);}
-  if(s.t1_tail){live.append(E('div','k','recorder:'));const t=E('div','tail');t.textContent=s.t1_tail;live.append(t);}
+  const det=E('details');det.innerHTML='<summary>原始录制日志 / raw log</summary>';
+  const raw=E('div','tail');raw.textContent=(s.arm_tail?('arm:\n'+s.arm_tail+'\n\n'):'')+(s.t1_tail?('recorder:\n'+s.t1_tail):'')||'(no log yet)';
+  det.append(raw);live.append(det);
  }catch(e){$('#state').textContent='api error';}
 }
 
@@ -292,7 +309,7 @@ function renderTable(){
   .forEach(b=>{const tr=E('tr');if(SEL===b.name)tr.className='sel';
    const v=b.scored?`<span class="val sc">${(+b.value).toFixed(3)}</span>`:'<span class="em">—</span>';
    tr.innerHTML=`<td>${esc(b.technique)}<div class="muted" style="font-size:10px">${esc(b.guid)}</div></td>
-    <td>${esc(b.posture)}</td><td>${v}</td><td class="muted">${esc((b.recorded_at||'').replace('T',' ').replace('Z',''))}</td>`;
+    <td>${esc(b.posture)}</td><td>${v}</td><td class="muted">${esc(String(b.recorded_at||'').replace('T',' ').replace('Z',''))}</td>`;
    tr.onclick=()=>{SEL=b.name;renderTable();detail(b.name);};tb.append(tr);});
 }
 $('.filters').onclick=e=>{if(e.target.dataset.f){FILTER=e.target.dataset.f;
