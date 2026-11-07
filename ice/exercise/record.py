@@ -36,6 +36,7 @@ deployed. A recording of ICE with its perception changed would not be a recordin
 from __future__ import annotations
 
 import argparse
+import gzip
 import io
 import calendar
 import json
@@ -1566,8 +1567,29 @@ def finish_episode(state: Dict[str, Any], arm: Dict[str, Any],
         # And the case is handed over complete rather than discovered: the recorder armed it and
         # knows when, and the daemon's own polling would write a snapshot into the machine every
         # cycle for a diff the recorder can take from outside.
-        if t1_reading:
-            hand_over_case(t0_reading, t1_reading)
+        n_changes = hand_over_case(t0_reading, t1_reading) if t1_reading else 0
+        if n_changes == 0:
+            # An arm that moved nothing the readings can see is nothing to investigate and nothing
+            # to score -- the agent's own GetDiff would be empty too. Running the agent and the
+            # judge here would spend a model-API round on an unchanged machine and leave a bundle
+            # with no episode in it. Record the skip and stop before either runs. ART ships linux
+            # tests whose payload files it never creates (T1001.002 reads a script.sh that is not
+            # in the repo); those arm into a no-op, and this is what keeps each from costing an
+            # agent+judge round out of the batch's model budget.
+            print("  !! the arm produced 0 change(s) the readings could see; skipping the agent "
+                  "and the judge -- an unchanged machine is nothing to score")
+            meta = {"episode_dir": ep, "scenario": scenario.id, "images": images,
+                    "aborted": "empty arm",
+                    "detail": "no T1-T0 change in the recorder's readings; agent and judge not run",
+                    "grade": {"detected": False, "miss": None,
+                              "reasons": ["nothing the readings could see changed between T0 and "
+                                          "T1, so there was nothing to investigate or score"]},
+                    "counts": {},
+                    "reward": {"scored": False, "value": None,
+                               "unscored_reason": "empty arm: 0 changes T1-T0"}}
+            (ep_dir / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
+            STATE_FILE.unlink(missing_ok=True)
+            return meta
 
         print(f"  waiting up to {INVESTIGATE_TIMEOUT:.0f}s for escalation + investigation")
         case = wait_for_case(arm["markers"], armed, live)
@@ -1604,7 +1626,14 @@ def finish_episode(state: Dict[str, Any], arm: Dict[str, Any],
             (ep_dir / "episode.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1))
         print(f">>> {ep}: grade={'MISS' if meta['grade'].get('miss') else 'OK'} "
               f"counts={meta['counts']}")
-        upload_bundle(ep_dir)
+        if upload_bundle(ep_dir) and os.environ.get("ICE_DROP_LOCAL_SNAPSHOTS", "1") == "1":
+            # The copy on the intake host is now the audit copy, so the box need not keep the heavy
+            # overlays -- that is what keeps the box from filling as the batch works through 423.
+            # If the upload failed, upload_bundle returned False and these stay put.
+            snaps = ep_dir / "snapshots"
+            if snaps.is_dir():
+                shutil.rmtree(snaps, ignore_errors=True)
+                print("  [box] dropped the local snapshot copies after a clean upload")
         STATE_FILE.unlink(missing_ok=True)
         return meta
     except TargetLost as e:
@@ -1652,9 +1681,15 @@ def stash_snapshots(ep_dir: Path, images: Dict[str, str]) -> Dict[str, Any]:
         src = vm.overlay_path(label)
         meta = src.with_name(label + ".meta.json")
         if src.exists():
-            dst = out / src.name
-            dst.write_bytes(src.read_bytes())
-            kept["files"][which] = {"path": f"snapshots/{src.name}", "bytes": dst.stat().st_size,
+            # Gzip rather than copy. A 60 MB qcow2 overlay is mostly unallocated clusters and goes
+            # to a few MB; that is what lets all 423 episodes' diffs fit on both the box (20 GB) and
+            # the intake host (~30 GB free) at once. The intake flattens paths, so it lands beside
+            # the bundle's text; a re-judge un-gzips it before mounting over the shared base.
+            dst = out / (src.name + ".gz")
+            with open(src, "rb") as fin, gzip.open(dst, "wb", compresslevel=6) as fout:
+                shutil.copyfileobj(fin, fout, length=1 << 20)
+            kept["files"][which] = {"path": f"snapshots/{dst.name}", "bytes": dst.stat().st_size,
+                                    "raw_bytes": src.stat().st_size, "gzip": True,
                                     "role": "T1" if which == "live" else "T2"}
         if meta.exists():
             (out / meta.name).write_bytes(meta.read_bytes())
@@ -1663,7 +1698,7 @@ def stash_snapshots(ep_dir: Path, images: Dict[str, str]) -> Dict[str, Any]:
     return kept
 
 
-def upload_bundle(ep_dir: Path) -> None:
+def upload_bundle(ep_dir: Path) -> bool:
     """Push the finished bundle to the intake service, so it does not only exist on a rented disk.
 
     Failure here is reported and ignored: a bundle that is on this box and not yet uploaded is still
@@ -1673,29 +1708,34 @@ def upload_bundle(ep_dir: Path) -> None:
     """
     url = os.environ.get("ICE_INTAKE_URL")
     if not url:
-        return
+        return False
     import tarfile
     import urllib.error
     import urllib.request
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tf:
-        for f in sorted(ep_dir.iterdir()):
+        # Recurse: the per-episode diff snapshots live in snapshots/, and a top-level-only walk left
+        # them on the box -- the one thing a later re-judge cannot reconstruct. The intake flattens
+        # the archive's directory structure anyway, so a relative arcname is enough.
+        for f in sorted(ep_dir.rglob("*")):
             if f.is_file():
-                tf.add(f, arcname=f.name)
+                tf.add(f, arcname=str(f.relative_to(ep_dir)))
     body = buf.getvalue()
     req = urllib.request.Request(
         f"{url.rstrip('/')}/upload?episode={ep_dir.name}", data=body, method="POST",
         headers={"Content-Type": "application/gzip",
                  "X-Ice-Token": os.environ.get("ICE_INTAKE_TOKEN", "")})
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        with urllib.request.urlopen(req, timeout=300) as r:
             got = json.loads(r.read() or b"{}")
         print(f"  [upload] {len(got.get('written') or [])} files, {len(body) / 1024:.0f} KiB "
               f"-> {url}")
+        return True
     except urllib.error.HTTPError as e:
         print(f"  !! upload refused: HTTP {e.code} {e.read()[:200].decode(errors='replace')}")
     except Exception as e:                        # noqa: BLE001 - never lose an episode over this
         print(f"  !! upload failed ({type(e).__name__}: {e}); the bundle is still at {ep_dir}")
+    return False
 
 
 def prune_disks() -> None:
