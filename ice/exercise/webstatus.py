@@ -123,17 +123,24 @@ def _summary(ep: dict, name: str) -> dict:
         parts = base[4:].rsplit("_", 1)
         tech = parts[0].upper().replace("_", ".") if parts else ""
         guid = parts[1] if len(parts) > 1 else ""
+    else:
+        sc = ep.get("scenario")                   # non-ART (older manual) bundles
+        tech = (sc.get("id") or sc.get("display")) if isinstance(sc, dict) else (sc or base)
+    # recorded_at may be an ISO string or a float epoch; normalise to a readable UTC string
+    ra = ep.get("recorded_at")
+    if isinstance(ra, (int, float)):
+        ra = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ra))
     return {
         "name": name,
         "technique": tech, "guid": guid,
-        "posture": ep.get("posture") or ("benign" if r.get("benign") else "attack"),
+        "posture": "benign" if r.get("benign") else "attack",
         "scored": bool(r.get("scored")),
         "aborted": ep.get("aborted") or "",
         "value": r.get("value"),
         "cleared": r.get("cleared"), "damage": r.get("damage"),
         "worst_cleared": r.get("worst_cleared"), "worst_damage": r.get("worst_damage"),
         "grade_miss": g.get("miss"), "detected": g.get("detected"), "verdict": g.get("verdict"),
-        "recorded_at": str(ep.get("recorded_at") or ""),
+        "recorded_at": str(ra or ""),
         "scenario": ep.get("scenario") or "",
     }
 
