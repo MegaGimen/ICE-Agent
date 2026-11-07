@@ -1727,20 +1727,29 @@ def upload_bundle(ep_dir: Path) -> bool:
             if f.is_file():
                 tf.add(f, arcname=str(f.relative_to(ep_dir)))
     body = buf.getvalue()
-    req = urllib.request.Request(
-        f"{url.rstrip('/')}/upload?episode={ep_dir.name}", data=body, method="POST",
-        headers={"Content-Type": "application/gzip",
-                 "X-Ice-Token": os.environ.get("ICE_INTAKE_TOKEN", "")})
-    try:
-        with urllib.request.urlopen(req, timeout=300) as r:
-            got = json.loads(r.read() or b"{}")
-        print(f"  [upload] {len(got.get('written') or [])} files, {len(body) / 1024:.0f} KiB "
-              f"-> {url}")
-        return True
-    except urllib.error.HTTPError as e:
-        print(f"  !! upload refused: HTTP {e.code} {e.read()[:200].decode(errors='replace')}")
-    except Exception as e:                        # noqa: BLE001 - never lose an episode over this
-        print(f"  !! upload failed ({type(e).__name__}: {e}); the bundle is still at {ep_dir}")
+    # Retry on transient transport errors: the bundles now carry the gzipped overlays (~10 MB), and a
+    # single-shot POST over the public link to intake loses the odd one to a connection reset. A
+    # refusal (HTTP 4xx/5xx) is not retried -- it will not fix itself.
+    last = ""
+    for attempt in range(3):
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/upload?episode={ep_dir.name}", data=body, method="POST",
+            headers={"Content-Type": "application/gzip",
+                     "X-Ice-Token": os.environ.get("ICE_INTAKE_TOKEN", "")})
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                got = json.loads(r.read() or b"{}")
+            print(f"  [upload] {len(got.get('written') or [])} files, {len(body) / 1024:.0f} KiB "
+                  f"-> {url}" + (f" (attempt {attempt + 1})" if attempt else ""))
+            return True
+        except urllib.error.HTTPError as e:
+            print(f"  !! upload refused: HTTP {e.code} {e.read()[:200].decode(errors='replace')}")
+            return False
+        except Exception as e:                    # noqa: BLE001 - never lose an episode over this
+            last = f"{type(e).__name__}: {e}"
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    print(f"  !! upload failed after 3 tries ({last}); the bundle is still at {ep_dir}")
     return False
 
 
@@ -1764,7 +1773,7 @@ def prune_disks() -> None:
     dropped = 0
     held = []
     for stem in order[keep:]:
-        if not scored_already(stem):
+        if not droppable(stem):
             held.append(stem)
             continue
         for label in groups[stem]:
@@ -1777,6 +1786,23 @@ def prune_disks() -> None:
         print(f"  [prune] dropped {dropped} disk(s) from {len(order) - keep} older episode(s); "
               f"their evidence.json still shows what the judge was given, but re-judging them "
               f"needs the disks and is no longer possible")
+
+
+def droppable(stem: str) -> bool:
+    """An episode whose disks we no longer need to keep. Either it carries a score (and so is
+    re-judgeable from its uploaded bundle, whose gzipped overlays travelled with it), or it was an
+    empty arm -- nothing happened between T0 and T1, so there is nothing to re-judge. Everything
+    else (e.g. an episode that lost its target mid-run) is held, as before, in case its disks are
+    still worth a look. Without this the empty arms -- most of an ART batch -- pile up unscored and
+    unbounded on the box."""
+    ep = DATASET / stem / "episode.json"
+    try:
+        m = json.loads(ep.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if (m.get("reward") or {}).get("value") is not None:
+        return True
+    return m.get("aborted") == "empty arm"
 
 
 def scored_already(stem: str) -> bool:

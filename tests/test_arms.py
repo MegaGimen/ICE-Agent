@@ -187,7 +187,7 @@ def test_an_unscored_episode_keeps_its_disks() -> None:
 
     assert inspect.signature(record.prune_disks) is not None
     src = inspect.getsource(record.prune_disks)
-    assert "scored_already(stem)" in src
+    assert "droppable(stem)" in src
     assert 'os.environ.get("ICE_KEEP_EPISODE_DISKS", "20")' in src
 
     with tempfile.TemporaryDirectory() as d:
@@ -200,6 +200,15 @@ def test_an_unscored_episode_keeps_its_disks() -> None:
             assert record.scored_already("ep-scored") is True
             assert record.scored_already("ep-unscored") is False
             assert record.scored_already("ep-missing") is False
+            # droppable: a scored episode or an empty arm may lose its disks; a genuinely unscored
+            # episode (no value, not an empty arm) is still held for a possible re-judge.
+            (Path(d) / "ep-empty").mkdir()
+            (Path(d) / "ep-empty" / "episode.json").write_text(
+                '{"aborted": "empty arm", "reward": {"value": null}}')
+            assert record.droppable("ep-scored") is True
+            assert record.droppable("ep-unscored") is False
+            assert record.droppable("ep-empty") is True
+            assert record.droppable("ep-missing") is False
         finally:
             record.DATASET = real
 
