@@ -1494,7 +1494,12 @@ def start_episode(scenario: Scenario, index: int = 1) -> Dict[str, Any]:
     same machine up. The ssh port goes in it too, because that is per-process state in vm.py.
     """
     from ice.exercise import vm
-    ep = f"{scenario.id}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{index:03d}"
+    # The prefix is normally the scenario id; a batch (e.g. the ART run) overrides it with
+    # ICE_EPISODE_PREFIX so the bundle name carries the technique and test id. intake validates the
+    # name against ^[a-z0-9_]+-\d{8}T\d{6}Z-\d{3}$, so the prefix must be lower-case word chars:
+    # an ART id like "T1136.001" + guid is encoded as e.g. "t1136_001_a1040a30".
+    prefix = os.environ.get("ICE_EPISODE_PREFIX") or scenario.id
+    ep = f"{prefix}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{index:03d}"
     images = boot_target(ep)
     # The baseline is the golden image itself, shared by every episode, so T1 - T0 and T2 - T0 are
     # measured against the same thing in every bundle.
@@ -1591,6 +1596,8 @@ def finish_episode(state: Dict[str, Any], arm: Dict[str, Any],
         vm.shutdown(live)
         vm.snapshot(images["final"], of=live)
         probe["recovered_without_ssh"] = collect_from_snapshot(ep_dir, images["final"], case, armed)
+        if os.environ.get("ICE_BUNDLE_SNAPSHOTS") == "1":
+            probe["snapshots_in_bundle"] = stash_snapshots(ep_dir, images)
         meta = export(ep_dir, scenario, case, armed, images, probe=probe, arm=arm)
         if dirty:
             meta["golden_image_residue"] = dirty
@@ -1621,6 +1628,39 @@ def finish_episode(state: Dict[str, Any], arm: Dict[str, Any],
         if os.environ.get("ICE_KEEP_LIVE_OVERLAY") != "1":
             vm.drop(live)       # the snapshots are the evidence; the working disk is not
         prune_disks()
+
+
+def stash_snapshots(ep_dir: Path, images: Dict[str, str]) -> Dict[str, Any]:
+    """Copy the per-episode diff snapshots into the bundle, so it can be re-judged later.
+
+    A re-judge needs the three filesystem states T0/T1/T2. T0 is the golden image, shared by every
+    episode and identical, so it is not shipped -- it stays on the box, fetched once if an offline
+    re-judge ever needs it. What is per-episode is the two qcow2 overlays over that base: the live
+    one frozen at T1 and the final one at T2, with their sidecar metadata recording the backing
+    chain. They are small (tens of MB) next to the 4 GB base. Shipping them keeps the judge's
+    evidence auditable after the box is gone.
+    """
+    from ice.exercise import vm
+    out = ep_dir / "snapshots"
+    out.mkdir(exist_ok=True)
+    kept: Dict[str, Any] = {"note": "re-judge needs the shared base (T0); not shipped, it is on the box",
+                            "base_label": images.get("baseline"), "files": {}}
+    for which in ("live", "final"):
+        label = images.get(which)
+        if not label:
+            continue
+        src = vm.overlay_path(label)
+        meta = src.with_name(label + ".meta.json")
+        if src.exists():
+            dst = out / src.name
+            dst.write_bytes(src.read_bytes())
+            kept["files"][which] = {"path": f"snapshots/{src.name}", "bytes": dst.stat().st_size,
+                                    "role": "T1" if which == "live" else "T2"}
+        if meta.exists():
+            (out / meta.name).write_bytes(meta.read_bytes())
+    summary = ", ".join("%s=%dKiB" % (k, v["bytes"] // 1024) for k, v in kept["files"].items())
+    print("  [bundle] stashed diff snapshots: " + (summary or "none"))
+    return kept
 
 
 def upload_bundle(ep_dir: Path) -> None:
