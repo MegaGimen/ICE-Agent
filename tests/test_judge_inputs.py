@@ -506,3 +506,71 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         test_cross_check_calls_a_collection_failure_what_it_is(Path(d))
     print("ok: a collection failure is not graded as a detection failure")
+
+
+def test_a_throttle_is_waited_out_not_counted_as_a_failure() -> None:
+    """429 got the same 2s-then-4s backoff as a relay hiccup, so the judge gave up on a rate limit
+    after six seconds: five of seven axes came back "HTTP 429 ... code: throttling" and the episode
+    was unscorable against a healthy model and a subscription 29% used."""
+    import time as _time
+
+    calls, slept = [], []
+    real_sleep, judge_agent.time.sleep = judge_agent.time.sleep, lambda s: slept.append(s)
+
+    class _Throttle(judge_agent.urllib.error.HTTPError):
+        def __init__(self, n):
+            self.n = n
+            super().__init__("u", 429, "Too Many Requests", {}, None)
+
+        def read(self):
+            return b'{"error":{"code":"throttling"}}'
+
+    try:
+        def fake_open(req, timeout=None):
+            calls.append(1)
+            if len(calls) <= 2:
+                raise _Throttle(len(calls))
+            class R:
+                def __enter__(self): return self
+                def __exit__(self, *a): return False
+            r = R()
+            judge_agent.json.load = lambda _f: {"ok": True}
+            return r
+        real_open, judge_agent.urllib.request.urlopen = judge_agent.urllib.request.urlopen, fake_open
+        real_json = judge_agent.json.load
+        try:
+            out = judge_agent._post({"model": "m", "messages": []})
+        finally:
+            judge_agent.urllib.request.urlopen = real_open
+            judge_agent.json.load = real_json
+    finally:
+        judge_agent.time.sleep = real_sleep
+
+    assert out == {"ok": True}, out                 # it got through, not an error
+    assert len(calls) == 3
+    # and it actually waited, on the throttle schedule rather than the hiccup one
+    assert slept and min(slept) >= 20, slept
+    assert slept == list(judge_agent.THROTTLE_WAITS[:2])
+
+
+def test_a_real_4xx_is_still_not_retried() -> None:
+    calls = []
+
+    class _Bad(judge_agent.urllib.error.HTTPError):
+        def __init__(self):
+            super().__init__("u", 400, "Bad Request", {}, None)
+
+        def read(self):
+            return b'{"error":{"message":"bad"}}'
+
+    def fake_open(req, timeout=None):
+        calls.append(1)
+        raise _Bad()
+
+    real_open, judge_agent.urllib.request.urlopen = judge_agent.urllib.request.urlopen, fake_open
+    try:
+        out = judge_agent._post({"model": "m", "messages": []})
+    finally:
+        judge_agent.urllib.request.urlopen = real_open
+    assert len(calls) == 1
+    assert "HTTP 400" in out["_error"]

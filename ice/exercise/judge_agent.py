@@ -359,6 +359,14 @@ class Tools:
 
 
 RETRIES = int(os.environ.get("ICE_JUDGE_RETRIES", "3"))
+# A throttle is not a failure, it is a wait, and it was being treated as the first. 429 got the same
+# 2s-then-4s backoff as a relay hiccup, so the judge gave up on a rate limit after six seconds: five
+# of seven axes came back "HTTP 429: usage allocated quota exceeded ... code: throttling" and the
+# episode was unscorable with a model that was perfectly healthy and a subscription 29% used. An
+# episode's judging is about seventy calls back to back (seven axes, up to ten steps each) with no
+# pacing, which is what trips a per-minute limit in the first place.
+THROTTLE_WAITS = tuple(float(x) for x in
+                       os.environ.get("ICE_JUDGE_THROTTLE_WAITS", "20,45,90,180").split(",") if x)
 
 
 def _post(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -366,27 +374,47 @@ def _post(body: Dict[str, Any]) -> Dict[str, Any]:
 
     A single HTTP 502 cost an episode its score: the axis it hit returned an error, and reward.score
     refuses to put a number on a verdict with an unusable axis -- correctly, but a relay hiccup is
-    not a missing judgement. A 4xx is the request being wrong and is not retried.
+    not a missing judgement. A 4xx is the request being wrong and is not retried, except 429, which
+    is the one 4xx that means "later": it gets its own long waits, and `Retry-After` when the relay
+    sends one.
     """
     last: Dict[str, Any] = {"_error": "not attempted"}
-    for attempt in range(max(1, RETRIES)):
+    waits: List[float] = [2.0 * (i + 1) for i in range(max(1, RETRIES) - 1)]
+    throttled = 0
+    attempt = 0
+    while True:
         req = urllib.request.Request(BASE_URL.rstrip("/") + "/chat/completions",
                                      data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json",
                                               "Authorization": "Bearer " + API_KEY})
+        after = None
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
                 return json.load(r)
         except urllib.error.HTTPError as e:
             last = {"_error": f"HTTP {e.code}: {e.read()[:300].decode(errors='replace')}"}
-            if e.code < 500 and e.code != 429:
+            if e.code == 429:
+                if throttled >= len(THROTTLE_WAITS):
+                    return last
+                try:
+                    after = float(e.headers.get("Retry-After") or 0) or None
+                except (TypeError, ValueError):
+                    after = None
+                wait = after or THROTTLE_WAITS[throttled]
+                throttled += 1
+                print(f"    [throttled {throttled}/{len(THROTTLE_WAITS)}] waiting {wait:.0f}s"
+                      + (" (Retry-After)" if after else ""))
+                time.sleep(wait)
+                continue
+            if e.code < 500:
                 return last                       # the request is wrong; asking again will not fix
         except Exception as e:                            # noqa: BLE001
             last = {"_error": f"{type(e).__name__}: {e}"}
-        if attempt + 1 < max(1, RETRIES):
-            time.sleep(2 * (attempt + 1))
-            print(f"    [retry {attempt + 1}/{RETRIES - 1}] {last['_error'][:80]}")
-    return last
+        if attempt >= len(waits):
+            return last
+        time.sleep(waits[attempt])
+        attempt += 1
+        print(f"    [retry {attempt}/{len(waits)}] {last['_error'][:80]}")
 
 
 def own_footprint() -> str:
