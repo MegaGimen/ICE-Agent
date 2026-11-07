@@ -1672,25 +1672,31 @@ def stash_snapshots(ep_dir: Path, images: Dict[str, str]) -> Dict[str, Any]:
     from ice.exercise import vm
     out = ep_dir / "snapshots"
     out.mkdir(exist_ok=True)
-    kept: Dict[str, Any] = {"note": "re-judge needs the shared base (T0); not shipped, it is on the box",
+    kept: Dict[str, Any] = {"note": "re-judge needs the shared base (T0); not shipped, it is on the "
+                                    "box. The chain is base <- T1 <- T2: mount T2 over T1 over base.",
                             "base_label": images.get("baseline"), "files": {}}
-    for which in ("live", "final"):
-        label = images.get(which)
+    # T1 is the frozen live snapshot. A live snapshot inverts the chain: the "armed" label's sidecar
+    # points at the file qemu froze (the original <ep>-live.qcow2, the attack's diff over base),
+    # while the "live" label itself moves on to a fresh continuation overlay. Stashing "live" shipped
+    # that empty continuation and, worse, left out the frozen file that the final snapshot backs
+    # onto -- so neither T1 nor T2 could be mounted. T2 is the final snapshot, backed by that frozen
+    # T1. Both chained layers have to ship or neither opens.
+    for label, role in ((images.get("armed"), "T1"), (images.get("final"), "T2")):
         if not label:
             continue
         src = vm.overlay_path(label)
-        meta = src.with_name(label + ".meta.json")
+        meta = vm.OVERLAYS / f"{label}.meta.json"
         if src.exists():
-            # Gzip rather than copy. A 60 MB qcow2 overlay is mostly unallocated clusters and goes
+            # Gzip rather than copy. A 40-60 MB qcow2 overlay is mostly unallocated clusters and goes
             # to a few MB; that is what lets all 423 episodes' diffs fit on both the box (20 GB) and
             # the intake host (~30 GB free) at once. The intake flattens paths, so it lands beside
             # the bundle's text; a re-judge un-gzips it before mounting over the shared base.
             dst = out / (src.name + ".gz")
             with open(src, "rb") as fin, gzip.open(dst, "wb", compresslevel=6) as fout:
                 shutil.copyfileobj(fin, fout, length=1 << 20)
-            kept["files"][which] = {"path": f"snapshots/{dst.name}", "bytes": dst.stat().st_size,
-                                    "raw_bytes": src.stat().st_size, "gzip": True,
-                                    "role": "T1" if which == "live" else "T2"}
+            kept["files"][role] = {"path": f"snapshots/{dst.name}", "bytes": dst.stat().st_size,
+                                   "raw_bytes": src.stat().st_size, "gzip": True, "role": role,
+                                   "qcow2": src.name}
         if meta.exists():
             (out / meta.name).write_bytes(meta.read_bytes())
     summary = ", ".join("%s=%dKiB" % (k, v["bytes"] // 1024) for k, v in kept["files"].items())
