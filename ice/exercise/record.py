@@ -622,7 +622,8 @@ ARM = os.environ.get("ICE_SCENARIO_ARM", "attack")
 # The standard way to arm an episode: a shell script on the host, run inside the VM between T0 and
 # T1, decoupled from the scenario definitions. ICE_ARM_BENIGN picks how it is scored, ICE_ARM_EXPECTED
 # names a file listing what a benign arm placed (for the operator's-work axis). See
-# ice/exercise/record_episode.sh, which is the host-side entry point.
+# the arm-script path, which run_cases.sh uses for the five-case matrix. The standard entry point
+# for one episode is record_t0.sh / record_t1.sh, where the arming is done by hand in between.
 ARM_SCRIPT = os.environ.get("ICE_ARM_SCRIPT", "")
 ARM_BENIGN = os.environ.get("ICE_ARM_BENIGN", "") == "1"
 ARM_EXPECTED = os.environ.get("ICE_ARM_EXPECTED", "")
@@ -717,7 +718,7 @@ def _script_arm() -> Dict[str, Any]:
                     if ln.strip() and not ln.lstrip().startswith("#")]
     if ARM_BENIGN and not expected:
         print("  !! benign arm with no expected-list: the operator's-work axis will have nothing "
-              "to check. Pass an expected file as the third argument to record_episode.sh")
+              "to check. Pass an expected file with --expected")
     return {"arm": "benign" if ARM_BENIGN else path.stem, "script": body, "benign": ARM_BENIGN,
             "expected": expected, "markers": [], "facts": {}, "commands": [],
             "script_name": path.name}
@@ -1433,45 +1434,122 @@ def export(ep_dir: Path, scenario: Scenario, case: Optional[Dict[str, Any]], arm
 
 # ---------------------------------------------------------------- episode loop
 
-def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
-    """One episode: a machine of its own, the attack, ICE's response, then two snapshots of it.
+STATE_FILE = Path(os.environ.get("ICE_EPISODE_STATE",
+                                 str(Path(os.environ.get("ICE_RUN_DIR", "/root/ice-build"))
+                                     / "episode-in-progress.json")))
 
-    The attack and the response happen inside the VM. The recorder, the judge and the snapshots stay
-    out here, which is why there is no longer a list of files the agent must be stopped from
-    touching: it cannot reach them. An episode that cuts its own model access, as one did by
-    blackholing the relay with iptables, now only cuts its own VM's -- a result to record rather
-    than a rig to repair.
+
+def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
+    """One episode end to end: T0, the arm, then T1 onwards. The two halves run back to back.
+
+    This is the batch form, used by the five-case matrix. The hand-armed form is the same two halves
+    with a person in between: `record.py t0`, do whatever to the machine, `record.py t1 benign`.
     """
-    from ice.exercise import image, vm
+    arm = arm_of(scenario)
+    if not arm.get("commands") and not arm.get("script"):
+        raise SystemExit(f"scenario {scenario.id!r} has no {arm['arm']!r} arm defined")
+    state = start_episode(scenario, index)
+    desc = arm.get("script_name") or "; ".join(arm["commands"])[:100]
+    print(f"=== arm {scenario.id}/{arm['arm']} ({desc}) ===")
+    run_arm(arm)
+    return finish_episode(state, arm, scenario)
+
+
+def manual_arm(benign: bool, expected_file: str = "") -> Dict[str, Any]:
+    """The arm of a hand-armed episode: what it did is read off the machine, not declared here.
+
+    There is no command list and no script. The T1 - T0 diff is the record of what was done, which
+    is the same thing the judge is shown either way -- the arm's own commands were never part of
+    its evidence. All this carries is how to score it.
+    """
+    expected: List[str] = []
+    if expected_file and Path(expected_file).exists():
+        expected = [ln.strip() for ln in Path(expected_file).read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    if benign and not expected:
+        print("  !! benign with no expected-list: the operator's-work axis has nothing to check "
+              "against. Pass one with --expected")
+    return {"arm": "benign" if benign else "manual", "benign": benign, "expected": expected,
+            "markers": [], "facts": {}, "commands": [], "manual": True}
+
+
+def _reading_from_disk(ep_dir: Path, label: str) -> Optional[Dict[str, Any]]:
+    """A reading the other half of the episode already took and wrote to the bundle."""
+    f = ep_dir / f"runtime-{label}.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        print(f"  !! no {label} reading at {f}")
+        return None
+
+
+def start_episode(scenario: Scenario, index: int = 1) -> Dict[str, Any]:
+    """T0: a clean machine of its own, the baseline reading taken, and nothing done to it yet.
+
+    This is the half that resets. A fresh qcow2 overlay over the golden image *is* a clean machine,
+    so there is nothing to undo: whatever the last episode did went with its overlay. What is left
+    running from a previous attempt is shut down here.
+
+    Written to STATE_FILE so the T1 half -- a separate process, possibly much later -- can pick the
+    same machine up. The ssh port goes in it too, because that is per-process state in vm.py.
+    """
+    from ice.exercise import vm
     ep = f"{scenario.id}-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{index:03d}"
     images = boot_target(ep)
     # The baseline is the golden image itself, shared by every episode, so T1 - T0 and T2 - T0 are
     # measured against the same thing in every bundle.
     images.update({"baseline": vm.BASE_LABEL, "armed": f"{ep}-armed", "final": f"{ep}-final"})
     live = images["live"]
+    dirty = verify_clean(scenario)
+    if dirty:
+        print(f"  !! the golden image carries scenario residue: {dirty} — flagged in the bundle")
+
+    # T0 is the golden image. Nothing is prepared inside the episode and nothing is snapshotted for
+    # it: the image already carries ICE installed and enabled, so what boots is a healthy machine
+    # with the product running on it, which is what a deployment looks like. Preparing inside the
+    # episode is what once charged the attack with the recorder's own setup -- the systemd unit and
+    # every file a repo sync had touched -- and even done in the right order it left every episode
+    # with a baseline of its own, so no two were measured against the same thing.
+    ep_dir = DATASET / ep
+    if runtime_reading(ep_dir, "t0") is None:
+        raise RuntimeError("the T0 reading failed; the machine is up but osquery did not answer")
+    state = {"episode": ep, "scenario": scenario.id, "images": images, "live": live,
+             "port": vm.ssh_port(live), "t0_at": time.time(), "dirty": dirty}
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=1))
+    return state
+
+
+def adopt_episode() -> Dict[str, Any]:
+    """Pick up the machine the T0 half left running."""
+    from ice.exercise import vm
     try:
-        arm = arm_of(scenario)
-        if not arm.get("commands") and not arm.get("script"):
-            raise SystemExit(f"scenario {scenario.id!r} has no {arm['arm']!r} arm defined")
-        dirty = verify_clean(scenario)
-        if dirty:
-            print(f"  !! the golden image carries scenario residue: {dirty} — flagged in the bundle")
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"no episode in progress ({STATE_FILE}): {e}. Run the T0 step first.")
+    vm.adopt_port(state["live"], state["port"])
+    if not vm.running(state["live"]):
+        raise SystemExit(f"{state['live']} is not running any more; start a new episode at T0")
+    if vsh("systemctl is-active ice-daemon.service", timeout=60).stdout.strip() != "active":
+        raise SystemExit("the daemon is not running on the target any more; start again at T0")
+    return state
 
-        # T0 is the golden image. Nothing is prepared inside the episode and nothing is snapshotted
-        # for it: the image already carries ICE installed and enabled, so what boots is a healthy
-        # machine with the product running on it, which is what a deployment looks like. Preparing
-        # inside the episode is what once charged the attack with the recorder's own setup -- the
-        # systemd unit and every file a repo sync had touched -- and even done in the right order it
-        # left every episode with a baseline of its own, so no two were measured against the same
-        # thing.
-        ep_dir = DATASET / ep
-        t0_reading = runtime_reading(ep_dir, "t0")
 
-        desc = arm.get("script_name") or "; ".join(arm["commands"])[:100]
-        print(f"=== arm {scenario.id}/{arm['arm']} ({desc}) ===")
-        armed = time.time()
-        run_arm(arm)
+def finish_episode(state: Dict[str, Any], arm: Dict[str, Any],
+                   scenario: Scenario) -> Dict[str, Any]:
+    """T1 onwards: freeze the armed machine, let the agent at it, then score what it left.
 
+    Whatever armed the machine -- a scenario's command list, an arm script, or a person at an ssh
+    prompt between the two halves -- is behind us by the time this runs. What the episode did is
+    read off the machine, not taken on trust from what was asked for.
+    """
+    from ice.exercise import image, vm
+    ep, images, live = state["episode"], state["images"], state["live"]
+    ep_dir = DATASET / ep
+    dirty = state.get("dirty") or []
+    t0_reading = _reading_from_disk(ep_dir, "t0")
+    armed = time.time()
+    try:
         # T1 is taken from the running machine. Shutting down for it cost more than the 17 seconds:
         # the reboot between the attack and the investigation destroyed the attack's runtime state,
         # so a process it started or a socket it held was gone before the agent ever looked, and
@@ -1520,6 +1598,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         print(f">>> {ep}: grade={'MISS' if meta['grade'].get('miss') else 'OK'} "
               f"counts={meta['counts']}")
         upload_bundle(ep_dir)
+        STATE_FILE.unlink(missing_ok=True)
         return meta
     except TargetLost as e:
         ep_dir = DATASET / ep
@@ -1635,6 +1714,18 @@ def main() -> None:
     r = sub.add_parser("run", help="record episodes")
     r.add_argument("scenario", choices=sorted(SCENARIOS))
     r.add_argument("--episodes", type=int, default=1)
+    # The two halves of one episode, with the arming done by hand in between. T0 resets the machine
+    # and takes the baseline; then whatever is done to it is done over ssh, by a person or a script
+    # of their own; T1 freezes it, wakes the agent and scores what it left.
+    t0 = sub.add_parser("t0", help="start an episode: clean machine, baseline reading, then stop")
+    t0.add_argument("--scenario", default="persistence", choices=sorted(SCENARIOS),
+                    help="only names the bundle and the residue check; the arming is yours")
+    t1 = sub.add_parser("t1", help="finish the episode armed since t0: agent, T2, score")
+    t1.add_argument("kind", choices=("benign", "attack"),
+                    help="benign: scored on the operator's-work axis (best 0) and the judge is "
+                         "told no attack was armed. attack: the seven axes")
+    t1.add_argument("--expected", default="",
+                    help="benign only: a file listing what the operator placed, one per line")
     a = ap.parse_args()
     if os.environ.get("ICE_RECORD_MODE") != "1":
         raise SystemExit("set the recording posture first: source ice/serving/record_env.sh")
@@ -1642,6 +1733,23 @@ def main() -> None:
         prepare_image()
         return
     DATASET.mkdir(parents=True, exist_ok=True)
+    if a.cmd == "t0":
+        st = start_episode(SCENARIOS[a.scenario])
+        port = st["port"]
+        print(f"\n>>> {st['episode']} is up and clean, T0 taken.\n"
+              f"    the machine:  ssh -i {Path(os.environ.get('ICE_VM_DIR', '/root/ice-vm')) / 'id_ed25519'}"
+              f" -p {port} -o StrictHostKeyChecking=no root@127.0.0.1\n"
+              f"    do whatever this episode is about, then:\n"
+              f"      record.py t1 attack          (or: t1 benign --expected <file>)")
+        return
+    if a.cmd == "t1":
+        st = adopt_episode()
+        meta = finish_episode(st, manual_arm(a.kind == "benign", a.expected),
+                              SCENARIOS[st.get("scenario", "persistence")])
+        r = meta.get("reward") or {}
+        print(f">>> {st['episode']}: value={r.get('value')} "
+              f"(cleared={r.get('cleared')} damage={r.get('damage')})")
+        return
     scenario = SCENARIOS[a.scenario]
     results = []
     for i in range(1, a.episodes + 1):

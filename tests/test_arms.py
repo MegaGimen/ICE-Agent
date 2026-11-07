@@ -104,7 +104,10 @@ def test_collection_does_not_need_the_vm_to_be_reachable() -> None:
     # The session is resolved out of the database rather than from the openclaw CLI over ssh.
     assert "session_nodes" in inspect.getsource(record._session_from_db)
     # And it runs after the final snapshot, where the disk is readable and the machine is down.
-    run = inspect.getsource(record.run_episode)
+    # The episode is two halves (start_episode = T0, finish_episode = T1 onwards) so that it can
+    # be armed by hand in between; these assertions are about the episode, so read both.
+    run = (inspect.getsource(record.start_episode) + inspect.getsource(record.finish_episode)
+           + inspect.getsource(record.run_episode))
     assert run.index('vm.snapshot(images["final"]') < run.index("collect_from_snapshot(")
 
 
@@ -210,8 +213,11 @@ def test_t0_is_the_image_and_nothing_is_prepared_in_the_episode() -> None:
 
     from ice.exercise import record, vm
 
-    run = inspect.getsource(record.run_episode)
-    assert "vm.BASE_LABEL" in inspect.getsource(record.run_episode) or True
+    # The episode is two halves (start_episode = T0, finish_episode = T1 onwards) so that it can
+    # be armed by hand in between; these assertions are about the episode, so read both.
+    run = (inspect.getsource(record.start_episode) + inspect.getsource(record.finish_episode)
+           + inspect.getsource(record.run_episode))
+    assert "vm.BASE_LABEL" in run
     assert '"baseline": vm.BASE_LABEL' in run
     # No baseline snapshot, and no shutdown before the attack.
     assert 'vm.snapshot(images["baseline"]' not in run
@@ -231,7 +237,10 @@ def test_the_armed_snapshot_does_not_stop_the_machine() -> None:
 
     from ice.exercise import record, vm
 
-    run = inspect.getsource(record.run_episode)
+    # The episode is two halves (start_episode = T0, finish_episode = T1 onwards) so that it can
+    # be armed by hand in between; these assertions are about the episode, so read both.
+    run = (inspect.getsource(record.start_episode) + inspect.getsource(record.finish_episode)
+           + inspect.getsource(record.run_episode))
     # T1 is taken live, and nothing is shut down between the attack and the investigation.
     assert "vm.snapshot_live(images[\"armed\"]" in run
     armed = run.index("snapshot_live(images[\"armed\"]")

@@ -116,6 +116,16 @@ def forget_port(label: str) -> None:
     _PORT.pop(label, None)
 
 
+def adopt_port(label: str, port: int) -> None:
+    """Take over a VM this process did not boot.
+
+    `_PORT` is filled in by boot(), so a second process -- the T1 half of a hand-armed episode --
+    starts with an empty registry and would address whatever is on the module default. The port is
+    carried over in the episode's state file and handed back here.
+    """
+    _PORT[label] = int(port)
+
+
 def live_label() -> str:
     """The episode's own VM, by name. Anything addressing "the VM" by a module default addresses
     whatever happens to be on port 2222, which has twice been a different machine."""

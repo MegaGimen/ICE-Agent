@@ -4,9 +4,10 @@
 
 The arm used to be one of three command lists hardcoded on the Scenario, chosen by an env string.
 That made a new case an edit to the recorder. The standard entry point is now
-ice/exercise/record_episode.sh <benign|attack> <arm-script> [expected-file]: the content of the
-episode is a file, benign or an attack, and the recorder runs it between T0 and T1 without knowing
-or caring what is in it.
+an arm script: a file the recorder runs between T0 and T1 without knowing or caring what is in it.
+run_cases.sh drives the five-case matrix this way. The standard single episode goes further and
+takes the recorder out of the arming entirely -- record_t0.sh, do whatever to the machine,
+record_t1.sh <benign|attack> -- which is tests/test_two_step_episode.py.
 """
 from __future__ import annotations
 
@@ -74,11 +75,10 @@ def test_run_arm_sends_a_script_whole_and_exposes_the_url() -> None:
     assert '"{tool_url}" in c' in body
 
 
-def test_the_launcher_maps_benign_and_passes_the_script() -> None:
-    sh = (ROOT / "ice" / "exercise" / "record_episode.sh").read_text()
-    assert "benign) BENIGN=1" in sh and "attack) BENIGN=0" in sh
-    assert "ICE_ARM_SCRIPT=" in sh and "ICE_ARM_BENIGN=" in sh and "ICE_ARM_EXPECTED=" in sh
-    assert "--episodes 1" in sh
+def test_the_env_knobs_are_what_an_arm_script_is_selected_with() -> None:
+    src = (ROOT / "ice" / "exercise" / "record.py").read_text()
+    for knob in ("ICE_ARM_SCRIPT", "ICE_ARM_BENIGN", "ICE_ARM_EXPECTED"):
+        assert f'os.environ.get("{knob}"' in src, knob
 
 
 def test_the_example_arms_are_present_and_valid() -> None:
