@@ -406,6 +406,39 @@ def wait_until_quiet(quiet: float = QUIET_SECONDS, cap: float = SETTLE_CAP) -> D
             "cut_off": True}
 
 
+def run_arm(arm: Dict[str, Any]) -> None:
+    """Run the episode's arm inside the VM, serving the rig directory to it for the duration.
+
+    A rig directory, when it exists, is served on the host's loopback and its base URL handed to
+    the arm two ways: a script reads $ICE_ARM_URL, and the scenario command lists keep their
+    {tool_url} placeholder (which points at the one tool the `normal` arm downloads). The server is
+    the recorder's and is shut down the moment the arm returns, so it is never part of what the
+    episode recorded.
+
+    A script arm is sent whole over stdin -- no per-command quoting to get wrong -- and must
+    succeed: a half-run arm is a broken episode, not a result. A command-list arm keeps the old
+    per-line behaviour.
+    """
+    rig = Path(os.environ.get("ICE_RIG_DIR", "/root/ice-rig"))
+    base, server = (serve_dir(rig) if rig.is_dir() else ("", None))
+    if base:
+        print(f"  [serve] {rig} at {base}")
+    try:
+        if arm.get("script"):
+            body = arm["script"]
+            if base:
+                body = f"export ICE_ARM_URL={base}\n" + body
+            vsh(body, label=arm["arm"], check=True, timeout=600)
+            return
+        tool = f"{base}/{TOOL}" if base else ""
+        for c in arm["commands"]:
+            vsh(c.replace("{tool_url}", tool) if "{tool_url}" in c else c, arm["arm"])
+    finally:
+        if server is not None:
+            server.shutdown()
+            print("  [serve] stopped")
+
+
 def _mcp_port() -> int:
     return int(os.environ.get("ICE_MCP_PORT", "8083"))
 
@@ -586,38 +619,51 @@ def boot_target(episode: str) -> Dict[str, str]:
 # is nothing to clear and nothing was broken. It asks whether the judge invents findings when there
 # is nothing there, and whether an agent that "remediates" a legitimate package is charged for it.
 ARM = os.environ.get("ICE_SCENARIO_ARM", "attack")
+# The standard way to arm an episode: a shell script on the host, run inside the VM between T0 and
+# T1, decoupled from the scenario definitions. ICE_ARM_BENIGN picks how it is scored, ICE_ARM_EXPECTED
+# names a file listing what a benign arm placed (for the operator's-work axis). See
+# ice/exercise/record_episode.sh, which is the host-side entry point.
+ARM_SCRIPT = os.environ.get("ICE_ARM_SCRIPT", "")
+ARM_BENIGN = os.environ.get("ICE_ARM_BENIGN", "") == "1"
+ARM_EXPECTED = os.environ.get("ICE_ARM_EXPECTED", "")
 # The benign arm's tool, built by ice/exercise/build_benign.sh into ICE_RIG_DIR.
 TOOL = os.environ.get("ICE_BENIGN_TOOL", "logreport")
 
 
-def serve_tool(path: Path) -> Tuple[str, Any]:
-    """Serve one file to the VM for the length of the arm, and say where to get it.
+def serve_dir(directory: Path) -> Tuple[str, Any]:
+    """Serve a directory to the VM over the host's loopback, and return its base URL.
 
-    The benign arm downloads an ops tool rather than having it appear on the disk, because where an
-    unknown executable came from is part of what the agent has to work out -- and a download leaves
-    the same trail an attacker's would. qemu's user networking puts the host at 10.0.2.2 from inside
-    the machine, and a connection there lands on the host's loopback, so a loopback server is all
-    this needs. It is shut down the moment the arm is done: an HTTP server of the recorder's own has
-    no business being in the episode's runtime tables.
+    An arm brings things onto the machine by downloading them rather than having them appear on the
+    disk from nowhere -- where an unknown file came from is part of what the agent has to work out,
+    and a download leaves the trail a real one would. qemu's user networking puts the host at
+    10.0.2.2 from inside the VM, landing on the host's loopback, so a loopback server is all this
+    needs. The server is the recorder's and has no business in the episode's own tables, so it is
+    shut down the moment the arm is done -- and it is the host's, not the VM's, so it never shows
+    up in the VM's runtime state regardless.
     """
     import functools
     import http.server
     import socket
     import threading
 
-    if not path.exists():
-        raise RuntimeError(f"the benign arm's tool is not built: {path} "
-                           f"(run ice/exercise/build_benign.sh)")
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(path.parent))
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
     httpd.log_message = lambda *a, **k: None          # type: ignore[assignment]
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    url = f"http://10.0.2.2:{port}/{path.name}"
-    print(f"  [serve] {path.name} ({path.stat().st_size // 1024} KiB) at {url}")
-    return url, httpd
+    return f"http://10.0.2.2:{port}", httpd
+
+
+def serve_tool(path: Path) -> Tuple[str, Any]:
+    """Serve one file (the scenario `normal` arm's {tool_url}); base URL plus the file name."""
+    if not path.exists():
+        raise RuntimeError(f"the benign arm's tool is not built: {path} "
+                           f"(run ice/exercise/build_benign.sh)")
+    base, httpd = serve_dir(path.parent)
+    print(f"  [serve] {path.name} ({path.stat().st_size // 1024} KiB) at {base}/{path.name}")
+    return f"{base}/{path.name}", httpd
 
 
 def push_interference() -> Dict[str, str]:
@@ -656,8 +702,31 @@ def push_interference() -> Dict[str, str]:
     raise RuntimeError("the daemon did not come back after the interference knobs were pushed")
 
 
+def _script_arm() -> Dict[str, Any]:
+    """An arm read from a host-side script file, run whole inside the VM.
+
+    The three hardcoded command lists below are the scenario's own, kept for the test matrix. This
+    is the general case: the content of the episode is a file, benign or an attack, chosen at the
+    command line, so adding one is writing a script rather than editing this module.
+    """
+    path = Path(ARM_SCRIPT)
+    body = path.read_text()
+    expected: List[str] = []
+    if ARM_EXPECTED and Path(ARM_EXPECTED).exists():
+        expected = [ln.strip() for ln in Path(ARM_EXPECTED).read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    if ARM_BENIGN and not expected:
+        print("  !! benign arm with no expected-list: the operator's-work axis will have nothing "
+              "to check. Pass an expected file as the third argument to record_episode.sh")
+    return {"arm": "benign" if ARM_BENIGN else path.stem, "script": body, "benign": ARM_BENIGN,
+            "expected": expected, "markers": [], "facts": {}, "commands": [],
+            "script_name": path.name}
+
+
 def arm_of(scenario: Scenario) -> Dict[str, Any]:
     """The commands, the markers that find the case, and whether this arm is an attack at all."""
+    if ARM_SCRIPT:
+        return _script_arm()
     if ARM == "variant":
         return {"arm": "variant", "commands": scenario.variant, "benign": False,
                 "markers": scenario.variant_markers or scenario.markers,
@@ -1382,7 +1451,7 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
     live = images["live"]
     try:
         arm = arm_of(scenario)
-        if not arm["commands"]:
+        if not arm.get("commands") and not arm.get("script"):
             raise SystemExit(f"scenario {scenario.id!r} has no {arm['arm']!r} arm defined")
         dirty = verify_clean(scenario)
         if dirty:
@@ -1398,20 +1467,10 @@ def run_episode(scenario: Scenario, index: int) -> Dict[str, Any]:
         ep_dir = DATASET / ep
         t0_reading = runtime_reading(ep_dir, "t0")
 
-        print(f"=== arm {scenario.id}/{arm['arm']} "
-              f"({'; '.join(arm['commands'])[:100]}) ===")
+        desc = arm.get("script_name") or "; ".join(arm["commands"])[:100]
+        print(f"=== arm {scenario.id}/{arm['arm']} ({desc}) ===")
         armed = time.time()
-        server = None
-        if any("{tool_url}" in c for c in arm["commands"]):
-            url, server = serve_tool(Path(os.environ.get("ICE_RIG_DIR", "/root/ice-rig")) / TOOL)
-            arm["commands"] = [c.replace("{tool_url}", url) for c in arm["commands"]]
-        try:
-            for c in arm["commands"]:
-                vsh(c, arm["arm"])
-        finally:
-            if server is not None:
-                server.shutdown()
-                print("  [serve] stopped")
+        run_arm(arm)
 
         # T1 is taken from the running machine. Shutting down for it cost more than the 17 seconds:
         # the reboot between the attack and the investigation destroyed the attack's runtime state,

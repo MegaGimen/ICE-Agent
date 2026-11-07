@@ -215,7 +215,7 @@ def test_t0_is_the_image_and_nothing_is_prepared_in_the_episode() -> None:
     assert '"baseline": vm.BASE_LABEL' in run
     # No baseline snapshot, and no shutdown before the attack.
     assert 'vm.snapshot(images["baseline"]' not in run
-    armed = run.index("for c in arm[\"commands\"]")
+    armed = run.index("armed = time.time()")
     assert "vm.shutdown" not in run[:armed], "the episode still stops the machine before the attack"
     # The readings are the recorder's own, taken at three moments.
     for label in ('"t0"', '"t1"', '"t2"'):
