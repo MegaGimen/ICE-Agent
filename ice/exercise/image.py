@@ -76,6 +76,7 @@ def exists_now(path: str, fallback: str) -> Tuple[bool, str]:
 
 
 FILE, DIR, LINK = 0, 1, 2
+UNREADABLE = -1   # directory entry exists but its inode cannot be stat'd (crash-consistent snapshot)
 Entry = Tuple[int, int, int, int, str]   # kind, size, mtime_ns, inode, symlink target
 
 
@@ -90,10 +91,15 @@ def index(label: str) -> Dict[str, Entry]:
             try:
                 st = os.lstat(fp)
             except OSError:
-                # Includes EUCLEAN on a snapshot taken from a running machine: an inode its journal
-                # never finished. Skipped rather than raised -- the entry is then simply not in this
-                # side's index, which reads as added or removed, and that is the honest answer about
-                # a path the filesystem will not describe.
+                # The directory entry exists (os.walk listed it) but its inode cannot be stat'd --
+                # typically EUCLEAN on a crash-consistent snapshot whose journal left this inode
+                # mid-transaction, even after replay. The file IS there; it is just not describable
+                # on this snapshot. Record it as UNREADABLE rather than omitting it, so diff() can
+                # tell "present but unreadable" (a snapshot artifact) from "directory entry gone" (a
+                # real removal). Omitting it made a live, present file (e.g. /etc/ssh/sshd_config,
+                # still serving an active session) read as removed and cost an episode a
+                # usability=service_broken it never earned.
+                out[fp[cut:] or "/"] = (UNREADABLE, -1, 0, 0, "")
                 continue
             if os.path.islink(fp):
                 kind, target = LINK, os.readlink(fp)
@@ -132,13 +138,19 @@ def diff(a: str, b: str, hash_check: bool = False) -> Dict[str, Any]:
     rewrite from a touch; without it they are reported as their own group rather than guessed at.
     """
     ia, ib = index(a), index(b)
-    added = sorted(p for p in ib if p not in ia)
-    removed = sorted(p for p in ia if p not in ib)
+    # A path that is UNREADABLE on either side is a snapshot artifact (its directory entry exists
+    # but the inode could not be read), not a real change: exclude it from added/removed, and skip
+    # it in the modified comparison below. A genuine deletion has no directory entry at all, so it
+    # is absent from the index entirely and is still reported as removed.
+    added = sorted(p for p in ib if p not in ia and ib[p][0] != UNREADABLE)
+    removed = sorted(p for p in ia if p not in ib and ia[p][0] != UNREADABLE)
     modified: List[str] = []
     mtime_only: List[str] = []
     retouched: List[str] = []
     for p in sorted(ia.keys() & ib.keys()):
         ea, eb = ia[p], ib[p]
+        if ea[0] == UNREADABLE or eb[0] == UNREADABLE:
+            continue                                # unreadable on one side -- a snapshot artifact
         if ea[0] != eb[0]:                          # file became a directory, or a symlink, ...
             modified.append(p)
             continue
