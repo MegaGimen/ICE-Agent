@@ -304,13 +304,22 @@ def runtime_reading(ep_dir: Path, label: str) -> Optional[Dict[str, Any]]:
     return got
 
 
-def hand_over_case(t0: Optional[Dict[str, Any]], t1: Dict[str, Any]) -> int:
+def hand_over_case(t0: Optional[Dict[str, Any]], t1: Dict[str, Any],
+                   images: Dict[str, Any]) -> int:
     """Diff the two readings here, and hand the daemon the case complete.
 
     Detection is not what a recording measures -- the forced-escalation flag has always short
     circuited it -- so having the daemon rediscover an attack the recorder just armed buys nothing
     and costs a snapshot inside the machine every cycle.
+
+    Two diffs go over, not one. osquery gives the runtime state and the structured account/cron/
+    key/unit tables. The files come from the whole-filesystem image diff (T0 base vs the T1 armed
+    snapshot) -- the same signal the judge's GetDiff reads -- because osquery watches only a fixed
+    set of paths and never sees a drop in /tmp, /opt or /usr/local. Before this, an attack whose
+    only footprint was such a file handed the agent an empty case and the episode scored nothing,
+    though the judge would have found the file and scored it.
     """
+    from ice.daemon.contracts import ChangeEntry, ChangeType
     from ice.daemon.perception.diff import diff as perception_diff
     from ice.daemon.perception.snapshot import Snapshot
     from ice.daemon.perception.store import Baseline
@@ -323,18 +332,37 @@ def hand_over_case(t0: Optional[Dict[str, Any]], t1: Dict[str, Any]) -> int:
     target = (vsh("hostname", timeout=30).stdout or "").strip().splitlines()[-1:] or [""]
     for e in entries:
         e.host = target[0] or TARGET_HOSTNAME
+    # The filesystem half: every path that differs between the T0 base and the T1 armed snapshot,
+    # minus volatile noise (same _changed/volatile the judge uses), synthesized into SYSTEM_FILE
+    # entries so they travel the normal pipeline to the agent. table="files" is not an osquery
+    # table, so the state-diff renderer skips it and the agent sees them in suspicious_changes.
+    file_entries: List[Any] = []
+    try:
+        from ice.exercise import image as _img
+        from ice.exercise.snapshot_reward import _changed as _fs_changed
+        fs = _fs_changed(_img.changes(images["baseline"], images["armed"], live=False))
+        cap = int(os.environ.get("ICE_FILE_DIFF_CAP", "150"))
+        for path, status in sorted(fs.items())[:cap]:
+            file_entries.append(ChangeEntry(
+                type=ChangeType.SYSTEM_FILE, table="files", field=path,
+                value=f"{status}: {path}", host=target[0] or TARGET_HOSTNAME,
+                untrusted={"path": path}))
+    except Exception as e:                         # noqa: BLE001 - a diff failure must not lose the episode
+        print(f"  [hand-over] filesystem diff unavailable ({type(e).__name__}: {e})")
+    all_entries = list(entries) + file_entries
     # The baseline goes over with it. Without it the daemon has no T0 at all -- the perception loop
     # that used to leave one in the store does not run during a recording -- so the state diff in the
     # agent's prompt renders every row of every table as `+`, including root's own SSH key and the
     # 34 stock accounts. An agent reading that deletes root's key, correctly, from a false premise.
-    payload = {"snapshot": t1, "baseline": t0, "entries": [e.to_dict() for e in entries]}
+    payload = {"snapshot": t1, "baseline": t0, "entries": [e.to_dict() for e in all_entries]}
     body = json.dumps(payload, ensure_ascii=False)
     tmp = f"{STATE}/INVESTIGATE_NOW.tmp"
     vsh(f"mkdir -p {json.dumps(str(STATE))} && cat > {tmp} <<'ICEHANDOVER'\n{body}\nICEHANDOVER\n"
         f"mv {tmp} {STATE}/INVESTIGATE_NOW",
-        label=f"hand over {len(entries)} change(s)", check=True, timeout=120)
-    print(f"  [hand-over] {len(entries)} change(s) from the recorder's own two readings")
-    return len(entries)
+        label=f"hand over {len(all_entries)} change(s)", check=True, timeout=120)
+    print(f"  [hand-over] {len(entries)} runtime/osquery + {len(file_entries)} filesystem "
+          f"change(s) from the recorder's own two readings")
+    return len(all_entries)
 
 
 def ensure_mcp_token() -> None:
@@ -1567,7 +1595,7 @@ def finish_episode(state: Dict[str, Any], arm: Dict[str, Any],
         # And the case is handed over complete rather than discovered: the recorder armed it and
         # knows when, and the daemon's own polling would write a snapshot into the machine every
         # cycle for a diff the recorder can take from outside.
-        n_changes = hand_over_case(t0_reading, t1_reading) if t1_reading else 0
+        n_changes = hand_over_case(t0_reading, t1_reading, images) if t1_reading else 0
         if n_changes == 0:
             # An arm that moved nothing the readings can see is nothing to investigate and nothing
             # to score -- the agent's own GetDiff would be empty too. Running the agent and the
