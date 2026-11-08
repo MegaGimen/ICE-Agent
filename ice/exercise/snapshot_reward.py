@@ -43,7 +43,7 @@ Artifact = Tuple[str, str]        # (table, identity key), e.g. ("stable.listeni
 
 # Only state with no filesystem representation. Everything osquery reads out of a file is covered
 # by the images, exactly and without a lens.
-RUNTIME_TABLES = ("listening_ports", "autostart")
+RUNTIME_TABLES = ("listening_ports", "autostart", "kernel_modules", "mounts")
 
 # Paths that change on their own, or that only ever grow. Scoring them would make a perfect episode
 # unscorable: /var/log/auth.log records the attack's own useradd and cannot be unwritten.
@@ -59,6 +59,10 @@ VOLATILE_PREFIXES = (
     "/var/lib/landscape/", "/var/lib/cloud/", "/var/snap/", "/boot/grub/grubenv",
     "/run/", "/tmp/openclaw/",
     "/root/ice-state/", "/root/.openclaw/", "/root/.cache/", "/root/ice-build/",
+    # Service runtime state that regenerates on its own. tor/samba are installed for the
+    # techniques that invoke them but are not the machine's own services, so their caches are
+    # noise, not an attack's doing; logrotate's status ticks every rotation.
+    "/var/lib/logrotate/", "/var/lib/tor/", "/var/lib/samba/", "/var/lib/private/",
 )
 
 # The shadow suite's backup files. Their whole job is to hold the previous content of their primary,

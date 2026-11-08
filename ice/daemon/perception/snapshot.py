@@ -155,6 +155,24 @@ TABLES: List[Table] = [
         key=lambda r: r.get("path", ""),
         summary=lambda r: f"critical file {r.get('path')}",
     ),
+    # Loaded kernel modules and mounts live in the kernel, not on disk, so the filesystem diff
+    # cannot see an insmod'd rootkit or a bind-mount masquerade. osquery is the only place they
+    # show, which is why they belong here on the runtime side.
+    Table(
+        "kernel_modules", ChangeType.SYSTEM_FILE, "stable",
+        "SELECT name, size, used_by, status FROM kernel_modules",
+        key=lambda r: r.get("name", ""),
+        untrusted=("name",),
+        summary=lambda r: f"loaded kernel module {r.get('name')}",
+    ),
+    Table(
+        "mounts", ChangeType.SYSTEM_FILE, "stable",
+        "SELECT device, path, type, flags FROM mounts WHERE path NOT LIKE '/proc%' "
+        "AND path NOT LIKE '/sys%' AND path NOT LIKE '/run%' AND path NOT LIKE '/dev%'",
+        key=lambda r: f"{r.get('path')}#{r.get('device')}",
+        untrusted=("device", "path"),
+        summary=lambda r: f"mount {r.get('device')} at {r.get('path')} ({r.get('type')})",
+    ),
     Table(
         "processes", ChangeType.PROCESS, "flow",
         "SELECT p.pid, p.name, p.path, p.cmdline, p.cwd, u.username, pp.name AS parent_name, pp.path AS parent_path, "
