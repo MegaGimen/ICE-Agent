@@ -194,7 +194,7 @@ bodies and model-visible text are bounded. Web content remains untrusted evidenc
 For an independently provisioned disposable SSH guest:
 
 ```bash
-python3 -m arena.host_blue --out output/host-run --port 2299 \
+python3 -m arena.host_blue --investigation-only --out output/host-run --port 2299 \
   --key /path/to/guest-ssh-key --brief /path/to/operator-brief.json
 ```
 
@@ -241,3 +241,55 @@ The config contains `executables` (exact guest paths) and `endpoints` entries wi
 and expected response substring `expected`. These are evaluator-owned checks, not model-visible
 answers or a comprehensive malware detector. Preserve all probe failures and state whether a
 measurement occurred during the investigation, at its end, or after a controller reboot.
+
+
+## Complete scored host rollouts
+
+Use `python3 -m arena.host_match --config CONTRACT.json --port PORT --key SSH_KEY --out NEW_DIR`
+for a host training rollout. `host_blue` now requires explicit `--investigation-only` for unscored
+diagnostics; finishing an investigation must not be mistaken for delivering a training reward.
+
+The controller freezes the scoring contract before staging the opponent, reads T0, records actual
+red asset receipts, collects T1, runs blue while independently probing the guest, collects T2,
+seals evidence, judges, binds the reward to the full trajectory and packages/verifies a sibling case.
+An interrupted finalization can resume with `python3 -m arena.host_scoring finalize RUN_DIR` without
+rerunning blue or editing observations. `score RUN_DIR` recomputes; `verify RUN_DIR` checks the
+training binding. A sealed case is not overwritten with a different score.
+
+`host-outcome-v1` uses the existing new-arena demo weights, 0.25 per axis, and S = 1 - deductions:
+
+- Confidentiality: weight of actual received values exactly matching the private asset manifest,
+  deduplicated by asset. Blue cleanup cannot erase a prior delivery. Forged red prose earns nothing.
+- Integrity: maximum observed fraction of protected immutable files or service startup settings
+  differing from T0. Repairing a later state does not erase an observed earlier loss.
+- Availability/resources: maximum of the sampled legitimate endpoint failure fraction and measured
+  unauthorized CPU seconds / (fixed match horizon × declared CPU capacity), capped at one. CPU
+  ticks are a sampled lower bound, not a claim to measure every stolen cycle. The maximum avoids
+  double charging overlapping business and resource harm inside this axis.
+- Remaining access/execution: final observed unauthorized execution or an effective declared
+  enabled/running restart channel with an existing executable and matching observed ExecStart.
+  These specific channels must not be described as a comprehensive search for arbitrary backdoors.
+
+The contract declares `assets` with id/path/weight; a probe config with endpoints/files/units and
+unauthorized executable paths; `protected_files`, `protected_units`, `access_channels`, horizon,
+CPU capacity, operator brief and a guest-only `stage_command`. `deliver_assets` selects synthetic
+assets that the controlled red transport actually retrieves after staging. Asset values and judge
+configuration remain controller-private. This initial backend requires a closed, staged opponent
+and hypervisor containment; it does not pretend to capture arbitrary external exfiltration.
+
+No blue report or red command/reasoning transcript is an input to the outcome judge. All evidence
+is match-bound and hash-chained; completion heads and file hashes bind the reward, manifest and
+trajectory. Missing baseline/final/receipt coverage, invalid probes or excessive observation gaps
+produce `scored: false`, not a fabricated zero loss. Such failures are retained and excluded from
+reward-ready exports, with their reasons; never delete them to improve aggregate results.
+
+`training_binding.json` distinguishes a model trajectory with a reward from scripted infrastructure
+controls. Token IDs, masks and behavior log probabilities still belong to the learner; no optimizer
+update is claimed. The old legacy reward scale (including its benign 0.8 outcomes) is unchanged.
+
+Limitations: SSH observation trusts the guest OS/toolchain and is not yet hardened against a root
+policy that falsifies its kernel or probe runtime. Probe-channel loss invalidates evidence rather
+than proving business damage. Root-adversarial deployment needs an out-of-band measurement backend.
+The current experiment measures declared assets/channels in controlled guests, not every possible
+compromise on an arbitrary host. Historical bundles without T0/T1/T2 coverage cannot retroactively
+receive a defensible full reward; retain them and rerun the scenario with the complete collector.

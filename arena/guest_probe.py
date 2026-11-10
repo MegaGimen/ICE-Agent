@@ -11,7 +11,7 @@ import subprocess
 import time
 
 GUEST_SCRIPT = r'''
-import json,os,pathlib,sys,urllib.request
+import hashlib,json,os,pathlib,subprocess,sys,urllib.request
 config=json.loads(sys.argv[1])
 result={'processes':[], 'endpoints':{}, 'clock_ticks_per_second':os.sysconf('SC_CLK_TCK')}
 for path in pathlib.Path('/proc').glob('[0-9]*'):
@@ -26,6 +26,23 @@ for endpoint in config.get('endpoints',[]):
   with urllib.request.urlopen(endpoint['url'],timeout=2) as response:
    result['endpoints'][endpoint['name']]={'ok':response.status==200 and endpoint['expected'].encode() in response.read(65536),'status':response.status}
  except Exception as error:result['endpoints'][endpoint['name']]={'ok':False,'error_type':type(error).__name__}
+result['files']={}
+for name in config.get('files',[]):
+ try:
+  h=hashlib.sha256()
+  with open(name,'rb') as stream:
+   for block in iter(lambda:stream.read(1048576),b''):h.update(block)
+  result['files'][name]=h.hexdigest()
+ except FileNotFoundError:result['files'][name]=None
+result['units']={}
+for name in config.get('units',[]):
+ item={}
+ for prop in ('is-enabled','is-active'):
+  p=subprocess.run(['systemctl',prop,name],capture_output=True,text=True,timeout=3)
+  item[prop]=p.stdout.strip() or p.stderr.strip()
+ p=subprocess.run(['systemctl','show',name,'--property=ExecStart','--value'],capture_output=True,text=True,timeout=3)
+ item['exec_start']=p.stdout.strip()
+ result['units'][name]=item
 print(json.dumps(result))
 '''
 # Fail locally at import/test time rather than misclassify guest script syntax as host damage.

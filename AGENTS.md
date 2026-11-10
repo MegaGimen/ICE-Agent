@@ -37,12 +37,19 @@ v9 曾加入与开发题高度对应的示范，旧题通过不能视为泛化�
 
 新代码独立位于 arena/，运行说明在 arena/README.md。首个后端是 CPU 上真实 HTTP/SQLite 业务世界，攻击面限定为应用接口；不是任意代码或主机攻击隔离环境。已实现并行角色、结果取证、资产版本、交付物核验、四轴 demo reward、分组采样与外部 learner 的 reset/tools/get_reward 桥接。
 
-不得把脚本验收或一次模型 API 联调说成模型训练完成。QEMU/通用主机工具、PentestGPT 接入、长期记忆学习和模型参数优化属于后续阶段。旧评分代码不被新 arena 导入。
+不得把脚本验收或一次模型 API 联调说成模型训练完成。受控 QEMU 主机调查和结果评分已有独立入口；完整自适应红队/QEMU 网络后端、PentestGPT 接入、长期记忆学习和模型参数优化仍属于后续阶段。旧评分代码不被新 arena 导入。
 
 ## 联网调查与真实样本测试
 
 - `arena/web.py` 提供 Brave `websearch`、公共 HTTPS `fetchurl`、私有证据缓存及离线回放。搜索密钥只保存在控制器私有配置，不进入 guest、运行提示词或提交。
-- `arena/host_blue.py` 是独立的 SSH guest 调查入口，使用现有蓝队模型 API，提供 shell 与联网研究工具；不是完整 ICE daemon，也尚未实现主机对局的四轴 reward。原应用级后端不因此变成通用系统沙箱。
+- `arena/host_blue.py` 是独立的 SSH guest 调查入口，使用现有蓝队模型 API，提供 shell 与联网研究工具；不是完整 ICE daemon，该诊断入口自身不生成 reward；完整四轴评分由 `arena.host_match` 与 `arena.host_scoring` 承担。原应用级后端不因此变成通用系统沙箱。
 - QEMU 默认 user 网络允许出站。真实样本试验采用独立 qcow2 overlay、无共享宿主文件系统、`restrict=on` 和仅回环 SSH 转发；搜索及推理由控制器执行。不得把这种受控样本部署称为原始漏洞攻击链复现。
 - 正常服务未出现在非穷尽的任务说明中，不等于未授权或恶意。实际测试发现过此误判，修复与失败轨迹均保留。处置需依据具体行为或适用的明确策略，恢复误改时也要核对原先启用与运行状态。
 - 报告复核保留草稿；输出截断、超时、工具或轮数耗尽不得伪装成完整报告。模型叙述与独立过程/业务探针证据分别记录，不能用系统 uptime 冒充复发观察时长。
+
+## 主机场景奖励闭环
+
+- 完整主机对局入口为 `python -m arena.host_match`：预先冻结评分合同，T0 → 受控红队真实交付/T1 → 蓝队与独立探针 → T2 → 四轴结果裁判 → reward/轨迹绑定 → case 验证。`host_blue` 仅用于显式 `--investigation-only` 的无奖励诊断，不能把调查完成称为训练交付完成。
+- `host-outcome-v1` 沿用新 arena 的四轴等权 demo 配置：真实交付、受保护状态历史最大损失、业务/CPU 资源损失、最终有效执行/重启通道。旧量表（包括无害0.8）不变。清理不能消除已泄露数据、已消耗资源或已观察到的误处置。
+- `arena.host_scoring` 可独立复算、恢复中断的 finalize、验证 training_binding。裁判不读取蓝队报告或红队执行轨迹作为判分依据。模型轨迹和脚本验收对照分别标记，token IDs/logprobs/masks 仍由 learner 采集，不虚报优化器训练完成。
+- 历史证据不足不填零损失；缺失完整基线/观测/交付覆盖的旧数据保留无 reward 原因，并另跑完整场景。独立 SSH 取证仍信任 guest OS/toolchain，尚不能抵御 root 策略篡改探针环境；原始CVEs全链复现和自适应实时红队不在本次样本验收中冒充完成。

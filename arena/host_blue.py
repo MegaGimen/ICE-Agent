@@ -145,10 +145,13 @@ async def run(args):
 
 def main():
     p=argparse.ArgumentParser()
+    p.add_argument('--investigation-only',action='store_true',help='Explicit diagnostic mode without training reward; use arena.host_match for full rollouts')
     p.add_argument('--out',type=Path,required=True);p.add_argument('--port',type=int,required=True)
     p.add_argument('--key',type=Path,required=True);p.add_argument('--brief',type=Path,required=True)
     p.add_argument('--duration',type=float,default=600);p.add_argument('--turns',type=int,default=24)
     p.add_argument('--review-from',type=Path,help='Resume a completed run for evidence review; never overwrite it')
     p.add_argument('--web-mode',choices=['live','replay'],default='live');p.add_argument('--web-snapshot',type=Path)
-    asyncio.run(run(p.parse_args()))
+    args=p.parse_args()
+    if not args.investigation_only:p.error('For complete scored rollouts use python -m arena.host_match. Unscored diagnostics require --investigation-only.')
+    asyncio.run(run(args))
 if __name__=='__main__': main()
