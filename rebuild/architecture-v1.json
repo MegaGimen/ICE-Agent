@@ -1,0 +1,256 @@
+{
+  "name": "红蓝对抗与结果裁判系统",
+  "revision": "implementation-milestone-1",
+  "status": "cpu_application_backend_implemented",
+  "scope": {
+    "approach": "独立新系统；旧代码、评分和数据仅供参考，不作为接口或实现约束",
+    "primary_training_target": "保护方的实际效果",
+    "research_goal": "检验红蓝对抗训练是否提升双方面对固定独立对手和未见场景的能力",
+    "presentation": "文字，不画流程图",
+    "spending": "方案确定前不创建付费 GPU 或其他付费资源"
+  },
+  "principles": [
+    "裁判评估可验证交付物、已经发生的业务后果、结束时仍有效的攻击机制，不阅读红队推理或命令轨迹来决定成败。",
+    "蓝队在攻击开始前已工作，并在对局中持续观察和执行响应；已发生的不可逆损失不能等到攻击结束后才让蓝队首次有机会处理。",
+    "快照是证据，不把某两个快照之间的全部变化默认归因于某一方。",
+    "没有持久状态差异仍须核验交付物和过程后果；不得直接跳过评分。",
+    "同一已发生后果只计一次，评分预算和资产价值在开局前冻结。",
+    "取证/评分控制面位于双方不能修改的环境；靶机故障与取证平台故障分别处理。",
+    "旧奖励保留其版本，不冒充新结果指标；测试答案与模型输入分离。"
+  ],
+  "components": [
+    {
+      "name": "场景工厂",
+      "responsibility": "创建独立靶机、合成业务数据、实际有效但仅作用于靶场的凭据、正常业务负载与私有资产账本",
+      "outputs": [
+        "场景版本与种子",
+        "双方各自的任务说明",
+        "私有资产真值与评分配置",
+        "初始状态证据"
+      ]
+    },
+    {
+      "name": "对局控制器",
+      "responsibility": "管理生命周期、双方权限与预算、共同时间窗口、结束封存；不给模型增加危险命令识别或逐命令人工审批",
+      "outputs": [
+        "可信时序",
+        "运行与采样时刻",
+        "终止原因",
+        "证据完整性状态"
+      ]
+    },
+    {
+      "name": "红队运行器",
+      "responsibility": "通过模型/工具适配层运行黑盒对手，向指定收件处提交结构化交付物",
+      "model_candidate": "hotdogs/Qwen3.8-27B-abliterated-cyber-preview",
+      "scorer_inputs_excluded": [
+        "红队推理文本",
+        "红队命令轨迹"
+      ],
+      "optional_training_records": "未来若训练红模型，训练器另存所需采样记录，仍不提供给裁判"
+    },
+    {
+      "name": "蓝队运行器",
+      "responsibility": "实际观察、调用取证工具、执行处置、读取结果并继续验证；采用持续交互，不只生成静态处置计划",
+      "tools": [
+        "主机与业务查询",
+        "准确指向目标或受控副本的文件读取/静态分析",
+        "实际具备隔离条件时的样本分析",
+        "范围明确的处置执行",
+        "只读结果验证"
+      ],
+      "activation": "正常事件与预先定义的巡检节奏；不得向蓝队泄露本局攻击脚本、攻击答案或私有真值"
+    },
+    {
+      "name": "结果记录器",
+      "responsibility": "对局全过程持续保存外部可核实的资产获取、业务状态及采样证据，并在结束时封存",
+      "records": [
+        "红队交付物原件与接收时刻",
+        "业务探针结果",
+        "保护资产状态",
+        "运行状态检查点",
+        "基线与结束镜像及其精确父链",
+        "证据来源与可信度"
+      ],
+      "note": "主机内日志和运行表可受攻击影响，不能冒充绝对可信来源；缺证据不等于零损失"
+    },
+    {
+      "name": "结果验证与评分器",
+      "responsibility": "先验证事实，再按冻结规则计分；程序核验明确结果，必要的语义分析只提出需验证的线索",
+      "checks": [
+        "本局密码/凭据匹配并扣除初始已知信息",
+        "数据内容或结构化记录的持有证明",
+        "业务完整性与可用性变化",
+        "结束时仍有效的新增访问/执行/持久化机制"
+      ],
+      "outputs": [
+        "验证结论与证据引用",
+        "损失分项",
+        "残留风险分项",
+        "标量分数与奖励版本",
+        "未确认项与数据质量状态"
+      ]
+    },
+    {
+      "name": "实验与训练管理器",
+      "responsibility": "记录完整蓝队输入、动作、工具反馈与策略版本；导出训练格式；固定对手与环境评测后再做交替训练和历史对手池",
+      "memory": "每场或每个明确任务链使用独立且可恢复的图/记忆版本；初期冻结或重置记忆以隔离训练效果"
+    }
+  ],
+  "first_world": {
+    "size": "一个实际运行的业务服务、一份数据库、一组凭据和正常业务探针",
+    "assets": [
+      "合成业务记录与文档",
+      "作用于靶场内服务的有效凭据",
+      "可验证的访问权限",
+      "正常可用的业务功能"
+    ],
+    "initial_red_access": "固定并记录，不把开局已拥有的权限或凭据当作新成果；不同起始权限的场景分开评测",
+    "attackability": "独立验收确认存在可达攻击路径，但不向 agent 提供标准攻击步骤，裁判也不要求走指定路径"
+  },
+  "context_boundaries": {
+    "red": "目标范围、初始身份、允许的环境接口、高层任务目标；不看私有资产值或评分结果真值",
+    "blue": "正常业务、资产保护目标、授权政策及自身可观察的状态；不看攻击计划或答案",
+    "verifier": "私有资产账本、冻结评分规则、交付物和事实证据；不依赖双方报告修辞"
+  },
+  "lifecycle": [
+    "构建独立世界并验证基线",
+    "初始化蓝队观察与正常业务负载",
+    "开放红队行动，双方在共同预算窗口内交互",
+    "持续追加结果证据并接受交付物",
+    "按预先定义的截止规则停止新行动并封存结束状态",
+    "验证交付物和实际结果",
+    "聚合损失与残留风险并导出训练记录"
+  ],
+  "scoring_contract": {
+    "provisional_form": "基准分－已核实的实际损失－最终残留风险",
+    "valuation": "通过开局前冻结的资产价值和损失预算配置；不由裁判临时决定，不按报告条数或文字长度增加分数",
+    "deduplication": "资产＋后果类型＋事件标识去重；红队取得与保护方失去是同一后果的两个视角",
+    "irreversibility": "已经发生的泄露或业务中断不会因结束时恢复正常而被抹掉",
+    "protection": "蓝队删除数据或关闭业务的后果同样体现在保护效果中，不靠销毁资产获高分",
+    "quality": "靶机真实故障可构成有效损失；取证/裁判基础设施故障单独标记，不直接转换成对抗胜负"
+  },
+  "minimal_records": [
+    "match_spec.json",
+    "private_asset_manifest.json（仅控制面）",
+    "deliverables/",
+    "effects.jsonl",
+    "observations/",
+    "blue_trajectory.jsonl",
+    "verified_findings.json",
+    "score.json"
+  ],
+  "acceptance_without_paid_gpu": [
+    "真实交付敏感资产后清痕，仍记录已发生损失。",
+    "空报告或仅自称取得资产不产生收益。",
+    "重复提交同一资产不重复计费。",
+    "正常业务变化不被当作攻击损失。",
+    "蓝队损坏或关闭受保护业务不能获得满分。",
+    "结束时有效后门被记录，已清除机制不被继续当作当前残留。",
+    "无持久快照差异的对局仍能完成交付物验证和评分。",
+    "不同对局的秘密、图、记忆和证据不会串用。",
+    "取证故障与实际业务损失能够区分。"
+  ],
+  "implementation_order": [
+    "先确定接口、证据契约与资产价值配置方式",
+    "CPU 环境构建业务服务和确定性验证器，用受控脚本验证结果闭环",
+    "完成新蓝队交互与记录接口、模型适配接口及无付费资源验收",
+    "方案与 CPU 闭环通过后，再租单卡部署红队模型并做基线对局",
+    "随后接蓝队 RL 训练、独立对照、历史对手池；记忆学习作为单独实验因素"
+  ],
+  "legacy_usage": "对抗编排与结果裁判独立设计；ICE 的感知、调查、执行、验证、事件图和经验接口可较多参考并逐项评估复用。不得沿用旧评分语义或先完成攻击才启动防守的录制约束。",
+  "network_design": {
+    "current_reference": "旧 QEMU 启动代码使用 user 网络，入站仅将 SSH 转发到宿主 loopback；这不是完整的外部业务攻击入口。",
+    "principle": "红队必须从独立攻击者网络触达业务服务；公网地址本身不是攻击真实性的必要条件，新增网卡本身也不提供公网可达性。",
+    "recommended_planes": [
+      "红队执行网络：攻击工具在独立执行机，推理 GPU 仅提供模型服务",
+      "业务网络：靶机服务、正常业务客户端、受控出站/交付端点",
+      "管理与取证网络：控制器、模型网关、资产真值和裁判，不作为攻击面"
+    ],
+    "qemu_backend": "条件允许时用 TAP/bridge 接入业务网络；不具备宿主权限时可先用明确的业务端口转发。",
+    "public_option": "通过独立网关/宿主端口映射公开选定业务服务；首版只让指定红队执行机进入，开放公网噪声另作实验。",
+    "state": "仅设计；尚未更改网络配置或公开服务",
+    "public_access_mechanics": "由平台在宿主机或独立网关配置业务端口转发、路由及源地址规则。QEMU hostaddr 选择监听的本地接口，不限制远端来源；特定来源限制由宿主机防火墙/网关/云安全组执行。红蓝 agent 不管理外层宿主控制面。"
+  },
+  "match_protocol": {
+    "mode": "双方同时在线、异步行动的实时攻防",
+    "preparation": "先验证正常业务基线，再让蓝队初始化并按固定准备预算巡检；随后开放红队，正常业务负载持续运行。准备期的业务破坏也记录。",
+    "within_match": "双方根据各自观察与工具结果独立推进。红队的操作改变世界，蓝队的阻断/恢复反过来改变红队可见结果。模型参数在本局固定。",
+    "observations": "不直接共享对方推理、计划或私有记忆；不依靠攻击完成通知才启动蓝队。",
+    "end": "预先定义行动和交付截止、封存过程与实际采样时刻；历史损失保留，最后再核验残留和业务状态。",
+    "timing_controls": "固定各方预算与环境条件，并记录推理/工具延迟，区分策略变化和基础设施速度变化。",
+    "secondary_mode": "先攻击后处置可作为独立的入侵后响应基准，不用来证明事前防止资产泄露的能力。"
+  },
+  "training_protocol": {
+    "initial": "固定红 R0 与蓝 B0 建立对照；以蓝队为主的初期可以先固定红队模型。",
+    "iteration": [
+      "固定红队参数 Rk，让它与当前蓝队 Bk 实时对抗，采集一批完整蓝队交互及分数 S。",
+      "用这批结果更新蓝队参数/适配器得到 B(k+1)，一局内不更新参数。",
+      "若开启红队训练，固定 B(k+1)，采集新对局的红队必要采样记录与 -S，更新得到 R(k+1)。",
+      "对新策略做固定独立对手、历史对手及未见场景评测，再归档 checkpoint 并更新对手池。"
+    ],
+    "frozen_definition": "固定仅指模型参数不更新，不代表对手在对局内停止观察或行动。",
+    "scorer": "同阶段裁判/资产价值规则冻结。裁判不读红队推理或命令轨迹。",
+    "trainer": "需要训练哪一方，就保存该方实际观察、采样动作、工具反馈和算法要求的采样概率；这些记录不必暴露给裁判。",
+    "memory": "对局内上下文/事件图可更新；初始跨局经验固定或隔离，跨局记忆学习单列实验。",
+    "resource_note": "5090 上的 Q6 部署用于推理；参数训练使用可训练权重/适配器及对应训练资源，不能把推理调用本身当成 RL 更新。"
+  },
+  "reward_delivery": {
+    "unit": "每场完整对局包含多次红蓝实时交互，结束后各自得到一个终局标量；不是多场共用一个分数。",
+    "report": [
+      "轴级已核实损失/风险",
+      "证据引用和未确认项",
+      "规则版本",
+      "合成保护成绩 S"
+    ],
+    "direction": "蓝队 reward=S，红队 reward=-S；损害越大 S 越低。",
+    "time_semantics": "终局结算全过程已发生损失及结束时的残留，不是只看最后快照。",
+    "initial_axes": [
+      "已验证的信息/凭据失守",
+      "业务数据完整性损失",
+      "业务可用性损失",
+      "最终有效后门/残留控制风险"
+    ],
+    "aggregation": "资产价值与各轴预算在开局前冻结，事实去重后先合成 S；训练器不再擅自重配轴权重。"
+  },
+  "algorithm_proposal": {
+    "initial_choice": "多轮、终局奖励的 GRPO，尚未实施或决定具体超参数",
+    "reason": "当前结果式标量奖励与可复位环境适合组内比较；无需单独训练价值网络，但需要多次完整对局。",
+    "group": "固定场景与资产配置、初始图/记忆、对手版本和预算；独立环境副本运行多个随机采样轨迹。组内不能中途更新模型或换对手。",
+    "execution": "组内各局可以串行运行以节省环境和推理资源；每局内部仍是双方实时攻防。",
+    "policy_data": "将奖励优势用于训练方生成的动作/token；工具返回和对手输出不作为该方的策略生成 token。正式 on-policy 更新需当前策略新采样。",
+    "failure_checks": [
+      "组内奖励几乎相同导致无有效优势信号",
+      "长对局信用分配困难",
+      "完整对局成本过高",
+      "推理/训练概率或精度不一致"
+    ],
+    "alternative": "若实测上述问题严重，对比 PPO＋价值网络；训练适配接口保持可替换，不把 GRPO 当作已证明最优。",
+    "framework_reference": "TRL GRPO 的多轮工具/环境接口可作实现起点；竞技场控制器保持独立。"
+  },
+  "implementation": {
+    "source": "arena/",
+    "documentation": "arena/README.md",
+    "backend": "real loopback HTTP service with SQLite state; HTTP application threat model only",
+    "implemented": [
+      "concurrent red/blue actor execution with bounded deadlines",
+      "private per-world assets and credential version ledger",
+      "exact deliverable verification and captured red-side receipts",
+      "historical state/availability evidence plus final valid API-key access",
+      "versioned four-axis demo scalar reward with proof references",
+      "same-state group sampling and standardized advantages",
+      "external learner reset/tools/get_reward bridge",
+      "OpenAI-compatible blue inference adapter",
+      "CPU acceptance suite and tests"
+    ],
+    "not_yet_implemented": [
+      "general QEMU/host-operation backend",
+      "PentestGPT red agent backend",
+      "LLM optimizer/token sampler integration",
+      "long-term graph/memory training",
+      "public network provisioning"
+    ],
+    "no_new_paid_resources": true,
+    "old_data_preserved": true
+  }
+}

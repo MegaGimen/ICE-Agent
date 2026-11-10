@@ -14,3 +14,10 @@ colab.md
 # Recorded episode bundles: data, not code. Synced from the recording box with
 # ice/exercise/sync_bundles.sh; 1.7 MB each and they would swamp the history.
 /dataset/
+# Generated training exports, private arena assets and experiment reports stay local.
+/training-data/
+/output/
+/art-benign-*.json
+/binary-agent-investigation-*.json
+/low-score-review-*.json
+/trajectory-audit-*.json
