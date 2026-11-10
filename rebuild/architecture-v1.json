@@ -252,5 +252,24 @@
     ],
     "no_new_paid_resources": true,
     "old_data_preserved": true
+  },
+  "red_objective_refinement": {
+    "goal": "在授权范围内自主探测、发现有价值资产并尝试获取，或造成可核验影响、建立有效后门；不预先指定具体收获对象或攻击步骤。",
+    "initial_information": [
+      "授权目标范围",
+      "初始身份与已知信息",
+      "可用工具",
+      "时间和资源预算",
+      "禁止触及的控制面边界"
+    ],
+    "not_given": [
+      "资产秘密值",
+      "私有资产账本",
+      "正确漏洞与攻击路径",
+      "必须窃取的具体文件位置或凭据答案"
+    ],
+    "no_outcome_rule": "只发现公开端口、版本或普通页面，不给予攻击成功收益；未取得保护资产、未留下有效后门且无实际损害时，没有攻击成果。",
+    "deliverable_contract_direction": "红队交付实际取得的内容及来源；裁判按私有账本核验归属和价值，不应要求红队提前知道内部资产 ID。",
+    "current_implementation_limit": "现有 ManualRed 是固定入口的 HTTP 验收对手，不是自主探测策略；LocalLab 是应用层后端，不包含通用端口扫描。脚本保留作回归，不作为红队能力证据。"
   }
 }
