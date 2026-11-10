@@ -177,3 +177,67 @@ losses and retained access, including harm caused by indiscriminate service term
 Do not use incident-specific filenames, hashes, answers or fixes as runtime prompt examples.
 A real QEMU service/process backend and agent-driven end-to-end N-day remediation evaluation
 are still outstanding; the commands above do not claim that capability has been demonstrated.
+
+## Public research and live guest investigation
+
+`arena.web.WebTools` provides Brave `websearch(query)` and public HTTPS `fetchurl(url)`.
+Set `BRAVE_SEARCH_API_KEY`, or store the key in a private file selected by
+`BRAVE_SEARCH_KEY_FILE` (default `/root/.config/ice-arena/brave.key`). Keys remain on the
+controller and are not included in tool definitions, model inputs or evidence headers.
+Responses, timestamps and hashes are recorded under the run's `web/` directory. Replay
+mode reads that snapshot without network access; absent queries are explicit misses.
+A replay directory must be treated as an immutable, independently sealed case artifact.
+Public fetch rejects private/reserved addresses, rechecks redirects and pins the resolved
+address for TLS; TLS still verifies the original hostname. HTML scripts/styles are omitted,
+bodies and model-visible text are bounded. Web content remains untrusted evidence.
+
+For an independently provisioned disposable SSH guest:
+
+```bash
+python3 -m arena.host_blue --out output/host-run --port 2299 \
+  --key /path/to/guest-ssh-key --brief /path/to/operator-brief.json
+```
+
+The same OpenAI-compatible blue adapter can now accept explicit tools and a generic host
+investigation role. This command exposes `observe`, `shell`, `websearch` and `fetchurl`.
+Shell runs only through the selected loopback SSH forward; no host shell tool is exposed to
+the model. The operator must verify that the port belongs to the intended disposable guest.
+The adapter does not itself provision isolation. For malware tests use a fresh qcow2 overlay,
+no shared host filesystem, and hypervisor-enforced outbound restrictions. QEMU user networking
+without `restrict=on` permits outbound traffic and is not adequate containment on its own.
+The controller performs external research and inference so their keys need not enter the guest.
+No command-string safety classifier is added inside the guest.
+
+This is a host investigation harness, not the complete ICE daemon, a concurrent autonomous
+red policy, a QEMU reward backend or a training optimizer. Generated agent reports are claims;
+independent process/service observations, recurrence checks and snapshot evidence establish
+actual outcomes. Do not assign the application demo reward to host incidents.
+
+Host investigations include a final evidence-review turn. The original draft and any corrections
+remain in the trajectory. A completed prior run can be reviewed in a new output directory using
+`--review-from /path/to/prior-run`; the original case is never rewritten. Truncated responses are
+not accepted as completed reports: the adapter requests a concise complete follow-up. The host
+adapter allows a larger output budget and longer provider response timeout than the application
+fixture. `agent_report.json.complete` distinguishes an actual final report from turn limits,
+provider failures and truncated outputs. This completion flag is not a correctness verdict.
+
+Repeated identical web requests within a run reuse the recorded response; cached bytes are checked
+against their recorded hash. Search requests are spaced and HTTP 429 responses get bounded retries.
+Failed external sources remain failures in the trajectory; they are not converted to successful
+findings. For comparable rollout groups, freeze an adequate research corpus in advance: a snapshot
+from one policy only supports that policy's observed queries, not arbitrary unseen searches.
+
+`arena.guest_probe` records independent endpoint/body and executable/process observations in the
+selected guest. Its guest Python payload is compiled locally and safely shell-quoted; SSH or script
+errors are marked `valid: false` and cannot be counted as successful probes or silently converted
+to business losses. Endpoint errors from a valid probe are separate observations. Example:
+
+```bash
+python3 -m arena.guest_probe --port 2299 --key /path/to/guest-key \
+  --config /path/to/probe-config.json --out output/probes.jsonl --duration 30
+```
+
+The config contains `executables` (exact guest paths) and `endpoints` entries with `name`, `url`,
+and expected response substring `expected`. These are evaluator-owned checks, not model-visible
+answers or a comprehensive malware detector. Preserve all probe failures and state whether a
+measurement occurred during the investigation, at its end, or after a controller reboot.

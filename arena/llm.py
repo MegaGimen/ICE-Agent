@@ -41,7 +41,7 @@ TOOLS = [
 
 
 class OpenAIBlue:
-    def __init__(self, base_url=None, model=None, api_key=None, *, temperature=.7, max_turns=6):
+    def __init__(self, base_url=None, model=None, api_key=None, *, temperature=.7, max_turns=6, tools=None, role=None, final_review=None, max_output_tokens=1800, model_timeout=60):
         self.base_url = (base_url or os.environ.get("ARENA_BLUE_BASE_URL") or
                          os.environ.get("ICE_AGENT_BASE_URL", "")).rstrip("/")
         self.model = model or os.environ.get("ARENA_BLUE_MODEL") or os.environ.get("ICE_AGENT_MODEL", "")
@@ -49,12 +49,17 @@ class OpenAIBlue:
         if not self.base_url or not self.model:
             raise ValueError("set ARENA_BLUE_BASE_URL and ARENA_BLUE_MODEL (or ICE_AGENT equivalents)")
         self.temperature, self.max_turns = temperature, max_turns
+        self.tools = TOOLS if tools is None else tools
+        self.role = ROLE if role is None else role
+        self.final_review = final_review
+        self.max_output_tokens = max_output_tokens
+        self.model_timeout = model_timeout
         self.policy_id = "chat-blue-1:" + digest({"endpoint": self.base_url, "model": self.model,
-             "role": ROLE, "tools": TOOLS, "temperature": temperature, "max_turns": max_turns})
+             "role": self.role, "tools": self.tools, "temperature": temperature, "max_turns": max_turns, "final_review": final_review, "max_output_tokens": max_output_tokens, "model_timeout": model_timeout})
 
     def _generate(self, messages, timeout):
-        body = {"model": self.model, "messages": messages, "tools": TOOLS, "tool_choice": "auto",
-                "temperature": self.temperature, "max_tokens": 1800}
+        body = {"model": self.model, "messages": messages, "tools": self.tools, "tool_choice": "auto",
+                "temperature": self.temperature, "max_tokens": self.max_output_tokens}
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = "Bearer " + self.api_key
@@ -62,19 +67,22 @@ class OpenAIBlue:
         with request.urlopen(req, timeout=timeout) as response:
             return json.load(response)
 
-    async def run(self, ctx):
+    async def run(self, ctx, initial_messages=None):
         observation = await ctx.call("observe")
-        messages = [{"role": "system", "content": ROLE},
+        messages = initial_messages if initial_messages is not None else [{"role": "system", "content": self.role},
                     {"role": "user", "content": json.dumps({"brief": ctx.public_brief(),
                                                               "observation": observation})}]
+        if initial_messages is not None:
+            messages.append({"role": "user", "content": json.dumps({"fresh_observation": observation, "brief": ctx.public_brief()})})
+        reviewed = False
         for turn in range(self.max_turns):
             remaining = ctx.deadline - time.monotonic()
             if remaining <= 0:
                 raise ArenaClosed("model action window ended")
             ctx.trajectory.append("model.input", {"turn": turn, "model": self.model,
-                                                 "messages": messages, "tools": TOOLS})
+                                                 "messages": messages, "tools": self.tools})
             try:
-                response = await asyncio.to_thread(self._generate, messages, min(60.0, remaining))
+                response = await asyncio.to_thread(self._generate, messages, min(self.model_timeout, remaining))
             except Exception:
                 if time.monotonic() >= ctx.deadline:
                     raise ArenaClosed("model call reached match deadline")
@@ -88,6 +96,15 @@ class OpenAIBlue:
             messages.append(message)
             calls = message.get("tool_calls") or []
             if not calls:
+                if choices[0].get("finish_reason") == "length":
+                    ctx.trajectory.append("policy.truncation", {"turn": turn})
+                    messages.append({"role": "user", "content": "Your previous response was truncated. Return a concise, complete report within the output budget. Preserve uncertainties and requested findings; omit repeated narrative. An unfinished response is not a completed report."})
+                    continue
+                if self.final_review and not reviewed:
+                    reviewed = True
+                    ctx.trajectory.append("policy.review", {"prompt": self.final_review})
+                    messages.append({"role": "user", "content": self.final_review})
+                    continue
                 return
             for call in calls:
                 fn = call.get("function") or {}
