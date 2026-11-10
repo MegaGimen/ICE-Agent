@@ -23,6 +23,8 @@ async def run_match(output: Path, red, blue, config: MatchConfig | None = None,
     if len(world_secret) < 32:
         raise ValueError("world secret must contain at least 32 bytes")
     output = Path(output)
+    if output.with_name(output.name + ".case").exists():
+        raise FileExistsError("case output already exists")
     output.mkdir(parents=True, exist_ok=False)
     (output / "private").mkdir(mode=0o700)
     write_json(output / "private/world_seed.json", {"secret_hex": world_secret.hex()}, private=True)
@@ -136,4 +138,7 @@ async def run_match(output: Path, red, blue, config: MatchConfig | None = None,
         raise RuntimeError("match setup failed: " + "; ".join(errors))
     result = score(output)
     write_json(output / "score.json", result)
-    return {"directory": str(output), "match": json.loads((output / "match.json").read_text()), "score": result}
+    from .cases import package_match
+    packaged = package_match(output)
+    return {"directory": str(output), "match": json.loads((output / "match.json").read_text()), "score": result,
+            "case_id": packaged["case_id"], "case_directory": str(output.with_name(output.name + ".case"))}

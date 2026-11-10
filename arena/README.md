@@ -132,3 +132,48 @@ and must not be used for untrusted Python policies, arbitrary host commands or g
 It proves the outcome/interaction/data plumbing. A QEMU/network backend, general host investigation
 tools, graph/long-term-memory training, PentestGPT adapter and actual LLM parameter optimization
 remain separate implementation stages. None is silently simulated and labeled complete here.
+
+## Incident cases and known-vulnerability checks
+
+Every completed match now also creates a sibling `<run>.case` directory. It contains a
+readable README, structured findings/actions/timeline, evidence and sample manifests, and
+byte-preserving private raw evidence. Findings cite evidence; executable-looking content is
+not automatically labelled malware. Files are hashed, copies lose executable permission,
+symlinks are skipped, and failed/over-budget collection is marked incomplete. Verification
+checks the exact file set and hashes; it is an integrity check, not an authenticity signature.
+
+```bash
+python3 -m arena case-import /path/to/historical-case --out output/cases/imported --archive
+python3 -m arena case-verify output/cases/imported
+python3 -m arena ndays inventory.json
+python3 -m arena process-demo --out output/cases/process-check
+```
+
+An optional `case-import --report report.json` supplies a title, summary, findings with
+source-relative `evidence_refs`, timeline, actions, verification and limitations. Report
+claims remain claims: importing does not certify them or execute their remediation steps.
+Keep original incident observations separate from later laboratory sample experiments.
+Raw evidence and archives may contain credentials and malware; these are private case
+bundles, not public sanitized exports or agent-visible training input.
+
+`ndays` consumes `{"software": [{"product": "...", "version": "...", "conditions": {},
+"assurance": "...", "evidence_refs": [], "scope": "..."}]}`. Its bootstrap catalog has two
+public advisories with explicit source URLs and applicability conditions. Catalog data is
+separate from policy prompts. Missing configuration facts remain unknown; unknown versions
+and vendor suffixes are not silently declared patched. This is inventory matching, not live
+inventory discovery, exploit validation, a complete vulnerability feed, or proof of cleanup.
+
+`process-demo` uses a real, benign controller-owned worker. It verifies termination followed
+by restart, rejection of stale process identities, then disabling restart and stopping the
+fresh process with a bounded no-respawn observation. It never executes imported samples or
+targets historical PIDs. This proves control primitives, not model malware recognition.
+
+The next OS-level capability evaluation must exercise a blue agent against fresh isolated
+worlds: collect software/configuration evidence; distinguish applicable vulnerabilities from
+uncertain matches; identify suspicious process ancestry, persistence and connections; contain
+and remove the mechanism; verify recurrence and legitimate service health; produce a case.
+Include patched/conditional/non-malicious controls and unseen scenarios. Score actual victim
+losses and retained access, including harm caused by indiscriminate service termination.
+Do not use incident-specific filenames, hashes, answers or fixes as runtime prompt examples.
+A real QEMU service/process backend and agent-driven end-to-end N-day remediation evaluation
+are still outstanding; the commands above do not claim that capability has been demonstrated.

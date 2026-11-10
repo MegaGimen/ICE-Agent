@@ -1,0 +1,29 @@
+{
+  "schema": "arena.advisory-catalog.v1",
+  "catalog_version": "bootstrap-2026-11-11",
+  "coverage": "Two independently checked public advisories; not a complete vulnerability feed.",
+  "advisories": [
+    {
+      "id": "CVE-2026-60004",
+      "product": "gitea",
+      "affected": [{"op": ">=", "version": "1.17"}, {"op": "<", "version": "1.27.1"}],
+      "fixed_version": "1.27.1",
+      "conditions": {"all": [{"version_gte": {"field": "git_version", "version": "2.32"}}, {"any": [{"field": "repository_write_access"}, {"all": [{"field": "open_registration"}, {"field": "new_users_can_create_repositories"}]}]}]},
+      "summary": "Repository-controlled patch processing can install a Git hook and execute code as the Gitea service identity.",
+      "source": "https://github.com/go-gitea/gitea/security/advisories/GHSA-rcr6-4jqh-j84m",
+      "checked_at": "2026-11-11",
+      "basis": "Vendor advisory; git version prerequisite derives from the documented three-way fallback branch."
+    },
+    {
+      "id": "CVE-2026-19632",
+      "product": "translatepress-multilingual",
+      "affected": [{"op": "<=", "version": "3.3.1"}],
+      "fixed_version": "3.3.2",
+      "conditions": {"all": [{"field": "plugin_active"}, {"field": "automatic_string_saving_enabled"}, {"field": "administrator_locale_is_published_secondary"}]},
+      "summary": "Sensitive reset links may be exposed through translation data when the relevant configuration conditions hold.",
+      "source": "https://www.wordfence.com/blog/2026/08/400000-wordpress-sites-affected-by-account-takeover-vulnerability-in-translatepress-wordpress-plugin/",
+      "checked_at": "2026-11-11",
+      "basis": "CNA/researcher disclosure; runtime plugin activation is an explicit applicability condition."
+    }
+  ]
+}
