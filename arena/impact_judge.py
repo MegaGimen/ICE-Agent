@@ -1,7 +1,7 @@
-"""Impact-based Agent judgment. No metric normalization, axis weights or score synthesis.
+"""Archived v4 free-rating judge, retained for historical verification and regression.
 
-Old contracts remain sealed source data; their rejected scoring fields are never presented
-as the current rubric. Agent-selected final rewards are copied, not calculated from metrics.
+New judging uses tier_judge.py. Its evidence view/parser are reused as fact-access helpers;
+the free-rating policy and inference functions below are not invoked by the current entry point.
 """
 import asyncio,json,math,os
 from pathlib import Path

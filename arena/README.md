@@ -1,3 +1,43 @@
+## Current policy: Agent-selected semantic tiers (v5)
+
+`host-agent-tiers-v5` restores the tier mechanism. Agents investigate one axis at a time and return
+`tier`, the exact selected `criterion`, applied `reason` and retrieved `evidence_ids` for red, blue
+and incident in every round. A numeric reward/loss in the Agent axis object is rejected. No final
+holistic Agent can replace the tier decisions with an arbitrary decimal.
+
+The explicit, frozen [profile](data/tier_profile_v5.json) supplies four-axis weights and tier values;
+[the complete table](TIER_PROFILE.md) explains each criterion. Red starts at 0 and receives table
+credits; blue starts at 1 and receives table deductions under its own responsibility scope. The new
+weights are confidentiality/control 0.30 each and integrity/availability 0.20 each; they are not
+claimed to be the old seven-axis weights. Impact coefficients reuse the old ICE SEVERITY ladder;
+residual coefficients reuse REMAINING. Axis meanings are adapted to the new four questions. Inert
+traces or defender-created blockers are not effective attacker control.
+
+CPU measurements, durations and counts never select tiers automatically. Unauthorized processing
+with usable core services can be a limited resource consequence; authorized diagnostics are not
+attack loss. An actual service failure is different evidence. The Agent must establish these facts
+and attribution rather than divide counters by cores/window length or count paths.
+
+A new match freezes `tier_profile.json` before actors run and records its id/hash in the contract.
+A rejudgment freezes the current profile in a separate revision while preserving old raw evidence.
+`ICE_TIER_PROFILE` may select another explicitly versioned profile. Old checkpoints cannot silently
+resume into this scale. Same-profile/model/guide checkpoints reuse completed axes; changed semantic
+fingerprints require a new revision.
+
+Use `python -m arena.judge_agent ORIGINAL_RUN --revision-out NEW_TIER_REVIEW` to rejudge without
+replaying attacks or exposing prior grades. `python -m arena.round_scoring verify NEW_TIER_REVIEW`
+checks the exact Agent labels, profile, table contributions and bound trajectories. The main entry
+is now `arena/tier_judge.py`; `arena/tier_contract.py` performs only explicit label-to-table arithmetic.
+V4 direct ratings and older normalized metric scores below are historical references, not current
+accepted policies. Raw observations and old judgments are never overwritten.
+
+Per-round cumulative table scores and delta/return audit values use one takeover boundary throughout
+the whole match. Scores are quantized: additional facts may stay in the same tier and must still be
+reported. Do not inflate tiers to force differences or reward repeated already-known disclosures.
+Learner-owned token IDs/log probabilities/masks and parameter optimization remain separate.
+
+---
+
 ## Current scoring policy: Agent assessment of actual impact (v4)
 
 The user rejected metric normalization as a reward ruler. `host-agent-impact-v4` does not turn CPU

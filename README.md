@@ -2,7 +2,7 @@
 
 ICE-Agent 研究红蓝对抗是否有助于提升双方能力，当前重点是蓝队的实际保护与处置效果。新实验框架独立位于 [`arena/`](arena/README.md)，复用已有模型服务，在操作者准备的隔离 QEMU 中执行真实操作、记录证据，并由裁判 Agent 评分。
 
-当前裁判版本为 **`host-agent-impact-v4`**。旧版应用演示、规则评分与早期 ICE 组件保留用于历史核验，不能把它们的分数当成当前裁判结果。
+当前裁判版本为 **`host-agent-tiers-v5`**。旧版应用演示、规则评分与早期 ICE 组件保留用于历史核验，不能把它们的分数当成当前裁判结果。
 
 ## 当前架构
 
@@ -12,8 +12,8 @@ ICE-Agent 研究红蓝对抗是否有助于提升双方能力，当前重点是�
 | 红队 | 当前使用受控脚本作为测试对手，执行部署、读取资产等实际操作，并记录取得数据的证据。尚未接入自主探测的 PentestGPT/红队模型。 |
 | 蓝队 Agent | 在分配的虚拟机中调查、处置和复查，使用 shell、Brave `websearch` 和公共网页 `fetchurl`。机器状态与会话跨回合保留。 |
 | 证据层 | 独立记录业务探针、文件与服务状态、进程计数、资产取得区间，以及双方的行动窗口。记录绑定同一 `match_id`；采集失败也保留。 |
-| 分轴裁判 Agent | 分别调查保密性、完整性、可用性／资源、残留控制，输出定性影响、证据引用和不确定性。取证工具见 [`arena/judge_tools.py`](arena/judge_tools.py)。 |
-| 综合裁判 Agent | 独立核对关键证据，结合分轴意见，直接给出每轮红、蓝 reward 和理由。当前实现见 [`arena/impact_judge.py`](arena/impact_judge.py)。 |
+| 分轴裁判 Agent | 分别调查保密性、完整性、可用性／资源、残留控制，依据版本化量表为红、蓝及事件选择档位，引用标准原文、证据和理由。取证工具见 [`arena/judge_tools.py`](arena/judge_tools.py)。 |
+| 量表映射 | Agent 逐轴调查并复核选档；程序校验档位、标准与证据，再按显式量表合成每轮红、蓝 reward。没有自由小数评级的综合裁判。当前实现见 [`arena/tier_judge.py`](arena/tier_judge.py)。 |
 | 交付与校验 | 校验证据引用、格式与哈希，绑定原始轨迹、裁判记录及 reward，并生成可核验的 case。入口见 [`arena/round_scoring.py`](arena/round_scoring.py)。 |
 
 实际执行发生在指定 guest 中，模型调用和搜索凭据保存在外部控制器。当前主机调查入口使用模型 API 适配器，并不是完整 ICE daemon 的全量集成。
@@ -32,9 +32,13 @@ ICE-Agent 研究红蓝对抗是否有助于提升双方能力，当前重点是�
 
 红队根据可归因于其攻击的实际成果获得评价；蓝队根据接管后的保护、处置和恢复效果获得评价。两份账目可以重叠，**不设 `R_red = -R_blue`**。蓝队自身造成的业务损害不自动计为红队收益，后来恢复也不代表历史损害没有发生。
 
-CPU、文件、进程、业务状态与时间记录都是证据。当前裁判不使用 CPU 秒数／核数／时长归一化、对象数量比例、固定等级映射或等权加总生成 reward。分轴 Agent 不给数值损失；综合裁判直接评级。`0..1` 仅为输出接口范围，不表示损失百分比。
+CPU、文件、进程、业务状态与时间记录都是证据，不能按 CPU 秒数／核数／时长、文件数量或资产数量比例自动决定档位。**裁判 Agent 负责语义判断并选档；程序只按公开量表映射，不替它判断事实，也不让它自由给一个小数。**
 
-固定程序负责调度、取证工具、证据完整性、输出校验和轨迹绑定，不替裁判决定影响大小。每轮增量与折扣回报只是对 Agent 已给 reward 的审计派生值。裁判无法完成有效判断时，不回退到规则评分。
+v5 采用新四轴权重：信息泄露 0.30、完整性 0.20、业务／资源影响 0.20、有效控制残留 0.30。前三轴使用原影响档分值梯度 `0 / 0.02 / 0.05 / 0.10 / 0.25 / 0.50 / 0.80 / 1`；控制残留使用 `none / minor / significant / severe`，系数 `0 / 0.33 / 0.67 / 1`。各轴事实标准见 [完整量表](arena/TIER_PROFILE.md)，权威配置为 [tier_profile_v5.json](arena/data/tier_profile_v5.json)。新四轴权重不是旧七轴权重。
+
+红队从 0 分起，各轴按“权重 × 所选档位系数”计收益；蓝队从 1 分起按同一表扣分。红、蓝取证与责任范围不同，因此结果不互为相反数。程序不再套 CPU 归一化公式，也不根据对象数推荐档位。单纯惯性痕迹、取证副本或防御者创建的空占位不是有效控制。
+
+每个 Agent 都要说明符合所选档位哪条标准，并给出证据引用；档位不合法、证据不足或 API 失败时不补分。每轮增量及折扣回报由映射后的 reward 派生，只用于监督接口与审计。相同档位可能产生平分，不能为了制造差异而升档或逐项额外加分。
 
 ## 运行与重判
 
@@ -66,7 +70,7 @@ python3 -m arena.judge_agent output/interrupted-match --resume \
 python3 -m pytest -q tests/arena
 ```
 
-输出目录必须是新目录。新判断不能覆盖旧判断；旧指标量表的检查点不能恢复成 v4，需要另建无旧分数输入的审判版本。对话或 SSH 中断后，先检查 tmux、日志、状态与已完成检查点，避免重复执行对局。
+输出目录必须是新目录。新判断不能覆盖旧判断；旧公式或自由评级的检查点不能恢复成 v5，需要另建无旧分数输入的审判版本。对话或 SSH 中断后，先检查 tmux、日志、状态与已完成检查点，避免重复执行对局。
 
 ## 轨迹、reward 与 case
 
@@ -74,9 +78,9 @@ python3 -m pytest -q tests/arena
 |---|---|
 | `match.json`、`completion.json`、`outcomes.jsonl` | 场景声明、控制器事件、时间边界及采集状态。 |
 | `red_trajectory.jsonl`、`blue_trajectory.jsonl` | 各自的原始行动／模型轨迹，包含回合与动作关联信息。 |
-| `impact_findings/`、`impact_checkpoints/` | 各调查阶段的定性意见、综合判断与恢复检查点。 |
+| `tier_profile.json`、`tier_verdicts/`、`tier_checkpoints/` | 冻结量表、分轴 Agent 所选档位与恢复检查点。 |
 | `judge_trajectory.jsonl`、`judge_verdict.json`、`judge_seal.json` | 裁判实际调用、原始结论、证据引用及来源哈希。 |
-| `score.json`、`red_reward.json`、`blue_reward.json`、`incident_outcome.json` | Agent 直接给出的奖励与事件影响说明，不是固定公式的分项损失表。 |
+| `score.json`、`red_reward.json`、`blue_reward.json`、`incident_outcome.json` | 所选档位、量表贡献、合成奖励与事件影响说明，可逐轴核算。 |
 | `training_binding.json`、同级 `<run>.case/` | 将对应轨迹、证据、裁判版本和 reward 绑定，并打包核验。 |
 
 整场多轮比赛是一条有状态 episode，当前以整场 reward 作为学习接口，回合增量用于审计。Token IDs、行为概率、动作 mask 和优化器由 learner 负责；完成案例评分不等于已经进行了 GRPO/PPO 参数训练。
@@ -91,4 +95,4 @@ python3 -m pytest -q tests/arena
 
 自主红队／PentestGPT 接入、完整并发网络对抗、长期 graph／记忆学习和模型参数优化仍是后续阶段。评估双方能力提升还需要固定独立对手、未见场景及训练对照。
 
-旧 [`ice/`](ice/) 组件、历史应用级 HTTP/SQLite 演示和旧量表保留用于参考与回归。历史分数及旧无害 episode 的 0.8 解释不被重写；当前新架构与评分口径以本页及 [arena 文档的 v4 说明](arena/README.md) 为准。
+旧 [`ice/`](ice/) 组件、历史应用级 HTTP/SQLite 演示和旧量表保留用于参考与回归。历史分数及旧无害 episode 的 0.8 解释不被重写；当前新架构与评分口径以本页及 [arena 文档的 v5 说明](arena/README.md) 为准。

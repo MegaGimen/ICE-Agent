@@ -1,5 +1,5 @@
 """Alternating foreground actors with continuous guest state and independent observation."""
-import argparse,asyncio,copy,json,math,shlex,subprocess,time,uuid
+import argparse,asyncio,copy,json,math,os,shlex,subprocess,time,uuid
 from pathlib import Path
 from .contracts import ArenaClosed,digest
 from .guest_probe import probe
@@ -64,7 +64,11 @@ async def run(args):
     ident=uuid.uuid4().hex;assets={'assets':[{k:v for k,v in a.items() if k in ('id','path','description','kind')} for a in cfg['assets']]}
     write_json(root/'private/assets.json',assets,private=True)
     model=OpenAIBlue(tools=HOST_TOOLS,role=HOST_ROLE,max_turns=12,max_output_tokens=3000,model_timeout=blue_seconds) if args.blue=='model' else None
-    spec={'match_id':ident,'reward_version':VERSION,'rounds':n,
+    from .tier_judge import DEFAULT_PROFILE
+    from .tier_contract import validate_profile
+    profile=json.loads(Path(os.environ.get('ICE_TIER_PROFILE',str(DEFAULT_PROFILE))).read_text());validate_profile(profile)
+    write_json(root/'tier_profile.json',profile,private=True)
+    spec={'match_id':ident,'reward_version':VERSION,'tier_profile_id':profile['id'],'tier_profile_hash':digest(profile),'rounds':n,
           'red_seconds':red_seconds,'blue_seconds':blue_seconds,'max_overrun_seconds':12,'max_probe_gap_seconds':12,
           'gamma':cfg.get('gamma',1),'cpu_capacity':cfg.get('cpu_capacity',2),'asset_manifest_hash':digest(assets),
           'endpoints':[e['name'] for e in cfg['probe']['endpoints']],'files':cfg['probe']['files'],'units':cfg['probe']['units'],

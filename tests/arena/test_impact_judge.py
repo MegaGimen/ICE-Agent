@@ -77,7 +77,7 @@ def test_full_impact_pipeline_and_resume_do_not_rerun_completed_findings(tmp_pat
 
 
 def test_current_entry_rejects_metric_based_resume(tmp_path):
-    from arena.judge_agent import judge_match
+    from arena.impact_judge import adjudicate_impact as judge_match
     from arena.storage import Journal
     prepare(tmp_path)
     j=Journal(tmp_path/'judge_trajectory.jsonl','m')

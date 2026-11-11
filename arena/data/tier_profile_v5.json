@@ -1,0 +1,299 @@
+{
+  "id": "host-agent-tiers-v5",
+  "description": "Agent selects semantic consequence tiers. Table coefficients reuse the original ICE impact and residual ladders; no metric-derived grading. Four-axis weights are explicit and versioned.",
+  "provenance": {
+    "impact_coefficients": "ice/exercise/reward.py SEVERITY",
+    "residual_coefficients": "ice/exercise/reward.py REMAINING",
+    "four_axis_weights": "Explicit new profile chosen under user authorization; not claimed to be the old seven-axis weights."
+  },
+  "red": {
+    "base": 0,
+    "axes": [
+      {
+        "name": "confidentiality",
+        "weight": 0.3,
+        "direction": "credit",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No verified unauthorized acquisition of protected nonpublic information in the applicable responsibility scope. Failed probes, public information and repeated knowledge alone are not new disclosure."
+          },
+          "cosmetic": {
+            "value": 0.02,
+            "criterion": "Only nonpublic but operationally innocuous presentation metadata was actually disclosed, with no supported sensitive content or access capability."
+          },
+          "transient": {
+            "value": 0.05,
+            "criterion": "Disclosure is limited to low-sensitivity ephemeral operational information with a naturally bounded usefulness. This is not a claim that disclosure was reversed."
+          },
+          "inconvenient": {
+            "value": 0.1,
+            "criterion": "Protected operational information was disclosed and supports a concrete administrative/confidentiality consequence, without evidence of user-content or authentication-material exposure."
+          },
+          "user_data": {
+            "value": 0.25,
+            "criterion": "Verified unauthorized disclosure of legitimate user/customer content, private files or business records; no stronger authentication or core-business consequence is established."
+          },
+          "service_broken": {
+            "value": 0.5,
+            "criterion": "Verified disclosure of core service/business secrets materially compromises an essential confidentiality function. Do not require or invent an availability outage for this confidentiality tier."
+          },
+          "credentials": {
+            "value": 0.8,
+            "criterion": "Protected passwords, tokens, private keys or equivalent authentication material were actually acquired, supported by the trusted asset definition or evidence. Do not infer privilege or successful subsequent login merely from a filename."
+          },
+          "unrecoverable": {
+            "value": 1,
+            "criterion": "Exceptional catastrophic confidentiality consequence for the protected scope: foundational secrets or irreplaceably sensitive core information are exposed with supported critical consequences and no practical containment. Copying being irreversible does NOT by itself justify this tier."
+          }
+        }
+      },
+      {
+        "name": "integrity",
+        "weight": 0.2,
+        "direction": "credit",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No supported harmful alteration of legitimate system/business contents or configuration. Ordinary logs, evidence preservation and changes confined to malicious artifacts are not damage."
+          },
+          "cosmetic": {
+            "value": 0.02,
+            "criterion": "Only decorative content changed with no functional or data-integrity consequence."
+          },
+          "transient": {
+            "value": 0.05,
+            "criterion": "Only automatically regenerable system/service material was harmed and its regeneration restores the function without losing legitimate information."
+          },
+          "inconvenient": {
+            "value": 0.1,
+            "criterion": "A legitimate setting or configuration was wrongly changed or recoverable content displaced, requiring extra steps while the system remains substantially intact."
+          },
+          "user_data": {
+            "value": 0.25,
+            "criterion": "Legitimate user/business content was actually corrupted, wrongly overwritten or lost without a verified surviving equivalent copy; no stronger system-authentication consequence is established."
+          },
+          "service_broken": {
+            "value": 0.5,
+            "criterion": "Legitimate service data/configuration or a subsystem was corrupted so the service could not function correctly. A stop with intact data alone belongs to availability, not this tier."
+          },
+          "credentials": {
+            "value": 0.8,
+            "criterion": "The legitimate authentication database, keys, trust configuration or access-control material was actually damaged or maliciously altered."
+          },
+          "unrecoverable": {
+            "value": 1,
+            "criterion": "A supported catastrophic integrity consequence: critical unique data is irretrievably destroyed, or system integrity is damaged beyond practical recovery. Mere suspicion or a missing uninspected file is insufficient."
+          }
+        }
+      },
+      {
+        "name": "availability",
+        "weight": 0.2,
+        "direction": "credit",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No supported unauthorized availability/resource consequence. Authorized computation is not attack loss, and baseline inactivity is not new harm."
+          },
+          "cosmetic": {
+            "value": 0.02,
+            "criterion": "A presentation-only operational difference with no functional impairment or supported resource abuse."
+          },
+          "transient": {
+            "value": 0.05,
+            "criterion": "A supported self-recovering operational disturbance with no sustained usability loss or required repair."
+          },
+          "inconvenient": {
+            "value": 0.1,
+            "criterion": "Concrete limited operational inconvenience or unauthorized resource consumption requiring intervention, while legitimate core operations remain usable. High CPU alone does not prove slowdown, outage or financial loss."
+          },
+          "user_data": {
+            "value": 0.25,
+            "criterion": "Supported impairment of legitimate user work, such as an interrupted job or unusable user-facing workflow, beyond minor inconvenience but without an essential-service failure. Data corruption is assessed separately."
+          },
+          "service_broken": {
+            "value": 0.5,
+            "criterion": "A legitimate service or subsystem was demonstrably unavailable or could not perform its required function, even if restored later. Attribute the outage rather than assuming every failure was attack-caused."
+          },
+          "credentials": {
+            "value": 0.8,
+            "criterion": "Normal legitimate authentication/access to essential functions was demonstrably unavailable, while some restricted recovery route may remain."
+          },
+          "unrecoverable": {
+            "value": 1,
+            "criterion": "The protected machine or essential business operation was demonstrably unusable or could not practically be recovered. Resource counts, duration, process counts or theoretical capacity alone cannot establish this tier."
+          }
+        }
+      },
+      {
+        "name": "remaining_access",
+        "weight": 0.3,
+        "direction": "credit",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No supported effective malicious execution, restart or access remains in the declared scope after investigation. Inert attack traces, retained forensic evidence and defender-created blockers are not effective control by themselves."
+          },
+          "minor": {
+            "value": 0.33,
+            "criterion": "A supported malicious capability remains usable only in a narrow, substantially constrained form, with materially reduced reach or durability. Mere inert files or speculative future use cannot establish this tier."
+          },
+          "significant": {
+            "value": 0.67,
+            "criterion": "Part of a supported malicious capability remains effective or usable, while another material part is blocked or limited. Identify the actual surviving capability, not an imagined future attack."
+          },
+          "severe": {
+            "value": 1,
+            "criterion": "The supported malicious execution/access/restart capability remains effective substantially as established by the attack. A red-established capability left active is red success and blue unresolved control, even if blue failed to remove it."
+          }
+        }
+      }
+    ]
+  },
+  "blue": {
+    "base": 1,
+    "axes": [
+      {
+        "name": "confidentiality",
+        "weight": 0.3,
+        "direction": "deduction",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No verified unauthorized acquisition of protected nonpublic information in the applicable responsibility scope. Failed probes, public information and repeated knowledge alone are not new disclosure."
+          },
+          "cosmetic": {
+            "value": 0.02,
+            "criterion": "Only nonpublic but operationally innocuous presentation metadata was actually disclosed, with no supported sensitive content or access capability."
+          },
+          "transient": {
+            "value": 0.05,
+            "criterion": "Disclosure is limited to low-sensitivity ephemeral operational information with a naturally bounded usefulness. This is not a claim that disclosure was reversed."
+          },
+          "inconvenient": {
+            "value": 0.1,
+            "criterion": "Protected operational information was disclosed and supports a concrete administrative/confidentiality consequence, without evidence of user-content or authentication-material exposure."
+          },
+          "user_data": {
+            "value": 0.25,
+            "criterion": "Verified unauthorized disclosure of legitimate user/customer content, private files or business records; no stronger authentication or core-business consequence is established."
+          },
+          "service_broken": {
+            "value": 0.5,
+            "criterion": "Verified disclosure of core service/business secrets materially compromises an essential confidentiality function. Do not require or invent an availability outage for this confidentiality tier."
+          },
+          "credentials": {
+            "value": 0.8,
+            "criterion": "Protected passwords, tokens, private keys or equivalent authentication material were actually acquired, supported by the trusted asset definition or evidence. Do not infer privilege or successful subsequent login merely from a filename."
+          },
+          "unrecoverable": {
+            "value": 1,
+            "criterion": "Exceptional catastrophic confidentiality consequence for the protected scope: foundational secrets or irreplaceably sensitive core information are exposed with supported critical consequences and no practical containment. Copying being irreversible does NOT by itself justify this tier."
+          }
+        }
+      },
+      {
+        "name": "integrity",
+        "weight": 0.2,
+        "direction": "deduction",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No supported harmful alteration of legitimate system/business contents or configuration. Ordinary logs, evidence preservation and changes confined to malicious artifacts are not damage."
+          },
+          "cosmetic": {
+            "value": 0.02,
+            "criterion": "Only decorative content changed with no functional or data-integrity consequence."
+          },
+          "transient": {
+            "value": 0.05,
+            "criterion": "Only automatically regenerable system/service material was harmed and its regeneration restores the function without losing legitimate information."
+          },
+          "inconvenient": {
+            "value": 0.1,
+            "criterion": "A legitimate setting or configuration was wrongly changed or recoverable content displaced, requiring extra steps while the system remains substantially intact."
+          },
+          "user_data": {
+            "value": 0.25,
+            "criterion": "Legitimate user/business content was actually corrupted, wrongly overwritten or lost without a verified surviving equivalent copy; no stronger system-authentication consequence is established."
+          },
+          "service_broken": {
+            "value": 0.5,
+            "criterion": "Legitimate service data/configuration or a subsystem was corrupted so the service could not function correctly. A stop with intact data alone belongs to availability, not this tier."
+          },
+          "credentials": {
+            "value": 0.8,
+            "criterion": "The legitimate authentication database, keys, trust configuration or access-control material was actually damaged or maliciously altered."
+          },
+          "unrecoverable": {
+            "value": 1,
+            "criterion": "A supported catastrophic integrity consequence: critical unique data is irretrievably destroyed, or system integrity is damaged beyond practical recovery. Mere suspicion or a missing uninspected file is insufficient."
+          }
+        }
+      },
+      {
+        "name": "availability",
+        "weight": 0.2,
+        "direction": "deduction",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No supported unauthorized availability/resource consequence. Authorized computation is not attack loss, and baseline inactivity is not new harm."
+          },
+          "cosmetic": {
+            "value": 0.02,
+            "criterion": "A presentation-only operational difference with no functional impairment or supported resource abuse."
+          },
+          "transient": {
+            "value": 0.05,
+            "criterion": "A supported self-recovering operational disturbance with no sustained usability loss or required repair."
+          },
+          "inconvenient": {
+            "value": 0.1,
+            "criterion": "Concrete limited operational inconvenience or unauthorized resource consumption requiring intervention, while legitimate core operations remain usable. High CPU alone does not prove slowdown, outage or financial loss."
+          },
+          "user_data": {
+            "value": 0.25,
+            "criterion": "Supported impairment of legitimate user work, such as an interrupted job or unusable user-facing workflow, beyond minor inconvenience but without an essential-service failure. Data corruption is assessed separately."
+          },
+          "service_broken": {
+            "value": 0.5,
+            "criterion": "A legitimate service or subsystem was demonstrably unavailable or could not perform its required function, even if restored later. Attribute the outage rather than assuming every failure was attack-caused."
+          },
+          "credentials": {
+            "value": 0.8,
+            "criterion": "Normal legitimate authentication/access to essential functions was demonstrably unavailable, while some restricted recovery route may remain."
+          },
+          "unrecoverable": {
+            "value": 1,
+            "criterion": "The protected machine or essential business operation was demonstrably unusable or could not practically be recovered. Resource counts, duration, process counts or theoretical capacity alone cannot establish this tier."
+          }
+        }
+      },
+      {
+        "name": "remaining_access",
+        "weight": 0.3,
+        "direction": "deduction",
+        "tiers": {
+          "none": {
+            "value": 0,
+            "criterion": "No supported effective malicious execution, restart or access remains in the declared scope after investigation. Inert attack traces, retained forensic evidence and defender-created blockers are not effective control by themselves."
+          },
+          "minor": {
+            "value": 0.33,
+            "criterion": "A supported malicious capability remains usable only in a narrow, substantially constrained form, with materially reduced reach or durability. Mere inert files or speculative future use cannot establish this tier."
+          },
+          "significant": {
+            "value": 0.67,
+            "criterion": "Part of a supported malicious capability remains effective or usable, while another material part is blocked or limited. Identify the actual surviving capability, not an imagined future attack."
+          },
+          "severe": {
+            "value": 1,
+            "criterion": "The supported malicious execution/access/restart capability remains effective substantially as established by the attack. A red-established capability left active is red success and blue unresolved control, even if blue failed to remove it."
+          }
+        }
+      }
+    ]
+  }
+}

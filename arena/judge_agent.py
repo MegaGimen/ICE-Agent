@@ -1,17 +1,20 @@
-"""Current impact-based judge entry point. Old metric verdicts remain readable, not reusable policies."""
+"""Current semantic-tier Agent judge; earlier verdicts remain readable for history."""
 import asyncio,json
 from pathlib import Path
-from .impact_judge import VERSION,adjudicate_impact,load_impact_score
+from .tier_judge import VERSION,adjudicate_tiers,load_tier_score
 from .host_scoring import file_hash
 from .storage import write_json
 from .judge_tools import configured_model
 
 async def judge_match(root,port=None,key=None,resume=False):
-    return await adjudicate_impact(root,port,key,resume=resume)
+    return await adjudicate_tiers(root,port,key,resume=resume)
 
 def load_score(root):
     root=Path(root);seal=json.loads((root/'judge_seal.json').read_text())
-    if seal.get('mode')=='impact_review':return load_impact_score(root)
+    if seal.get('mode')=='semantic_tiers':return load_tier_score(root)
+    if seal.get('mode')=='impact_review':
+        from .impact_judge import load_impact_score
+        return load_impact_score(root)
     # Historical verification only: never invoke the old judge to generate new values.
     from .legacy_metric_judge import load_score as historical_score
     return historical_score(root)
@@ -30,7 +33,8 @@ if __name__=='__main__':
         if args.resume:names.append('judge_trajectory.jsonl')
         for name in names:shutil.copyfile(source/name,target/name)
         if args.resume:
-            for name in ('judge_axes','judge_axis_state','impact_findings','impact_checkpoints'):
+            if (source/'tier_profile.json').exists():shutil.copyfile(source/'tier_profile.json',target/'tier_profile.json')
+            for name in ('judge_axes','judge_axis_state','impact_findings','impact_checkpoints','tier_verdicts','tier_checkpoints'):
                 if (source/name).exists():shutil.copytree(source/name,target/name)
         write_json(target/'adjudication_parent.json',{'source':str(source),'source_outcome_hash':file_hash(source/'outcomes.jsonl'),'resume':args.resume},private=True)
         root=target

@@ -24,7 +24,7 @@ def finalize(root):
     if s['scored']:
         verdict=json.loads((root/'judge_verdict.json').read_text())
         for role in ('red','blue'):
-            write_json(root/(role+'_reward.json'),{'reward':s[role+'_reward'],'assessment':verdict['rounds'][-1][role],'judge_kind':'agent'},private=True)
+            write_json(root/(role+'_reward.json'),{'reward':s[role+'_reward'],'assessment':verdict['rounds'][-1][role],'judge_kind':'agent','profile_id':s.get('profile_id'),'contributions':s['rounds'][-1].get('components',{}).get(role)},private=True)
         incident={'assessment':verdict['rounds'][-1]['incident'],'judge_kind':'agent'}
         if 'incident_loss' in s:incident['historical_v3_loss']=s['incident_loss']
         write_json(root/'incident_outcome.json',incident,private=True)
