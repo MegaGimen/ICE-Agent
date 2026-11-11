@@ -1,3 +1,39 @@
+## Current judge: Agent-owned investigation and scores
+
+New host rollouts use `python -m arena.round_match` (or `arena.host_match` with a `round_plan`).
+By default each axis has an independent judge Agent context, following the original per-axis investigation approach. The judge Agent actively reads event history, acquisition/version evidence and live read-only
+filesystem/runtime tools; it can consult public sources. It chooses each role/axis loss with evidence
+references and performs a review pass. The controller only validates provenance, timing structure,
+references, ranges and cumulative accounting, then weights/adds the Agent's values. There is **no
+rule-score fallback** on model failure or insufficient evidence. Older rule-based scores below are
+historical demonstrations, not the current judging implementation.
+
+The guest's historical observations and later live inspection are distinct. A file changing into a
+directory, symlink or special object is a fact to investigate, not automatically malware, damage,
+or probe failure. Missing history cannot be invented from the current live state. Current history
+collection covers the declared evidence scope; it is not a full-filesystem historical snapshot service.
+
+`judge_trajectory.jsonl`, `judge_verdict.json` and `judge_seal.json` preserve the actual model decisions,
+tool outputs and source hashes. `score.json` contains their arithmetic aggregation;
+`red_reward.json`, `blue_reward.json`, `incident_outcome.json`, per-round increments/returns and
+`training_binding.json` stay linked to the original red/blue trajectories and the judge artifacts.
+Verification rechecks the frozen Agent verdict and arithmetic; it does not pretend that a new model
+inference is deterministic. Errors and partial judgments stay in the case.
+
+Use one controller-owned takeover event per match. Red acquisition time, not submission time,
+determines the boundary; no per-round reset. Red and blue rewards are separately judged rather than
+negatives of each other. Foreground windows alternate, with continuous background effects and business.
+The blue conversation persists. The current red is a scripted test fixture, not an autonomous trained
+attacker. Whole-match rewards are exported; token masks/log probabilities and optimization remain the
+learner's responsibility. Legacy benign-0.8 data and past sealed cases are not rewritten.
+
+A compact snapshot presentation may omit repeated verbose ExecStart strings to keep judge context
+manageable; full original records remain selectable with `read_events(detail="full")` and are never
+removed from the audit. Provider retries and resumed adjudications are explicitly recorded. New
+adjudication versions preserve prior failures rather than overwrite them.
+
+---
+
 # Outcome arena — CPU implementation
 
 This is the first independent implementation of the new red/blue framework. It imports no
@@ -243,7 +279,7 @@ answers or a comprehensive malware detector. Preserve all probe failures and sta
 measurement occurred during the investigation, at its end, or after a controller reboot.
 
 
-## Complete scored host rollouts
+## Historical v1 rule-based host rollouts (not the current judge)
 
 Use `python3 -m arena.host_match --config CONTRACT.json --port PORT --key SSH_KEY --out NEW_DIR`
 for a host training rollout. `host_blue` now requires explicit `--investigation-only` for unscored
@@ -293,3 +329,62 @@ than proving business damage. Root-adversarial deployment needs an out-of-band m
 The current experiment measures declared assets/channels in controlled guests, not every possible
 compromise on an arbitrary host. Historical bundles without T0/T1/T2 coverage cannot retroactively
 receive a defensible full reward; retain them and rerun the scenario with the complete collector.
+
+
+## Agent-judged round configuration and recovery
+
+`round_plan` is a list of controller fixture entries with `red_command`, `deliver_assets`, and
+optional `blue_command` for scripted controls. Each delivery names an asset id; the optional
+`submit_after_round` delays reporting without changing its recorded acquisition interval.
+`red_seconds`, `blue_seconds`, `probe_interval`, `gamma`, assets, protected state, endpoints and
+access channels are declared before the match. `receipt_coverage=closed_scripted_transport` makes
+this adapter's observation boundary explicit. These are test environment settings, never examples
+or expected answers embedded in defender/judge runtime prompts.
+
+```bash
+python3 -m arena.round_match --config experiment.json --port 2291 \
+  --key /path/to/guest-key --out output/new-match
+python3 -m arena.round_scoring verify output/new-match
+```
+
+If provider failure interrupts the judge, preserve the original run and resume in a new revision:
+
+```bash
+python3 -m arena.judge_agent output/new-match --resume \
+  --revision-out output/new-match-judge-retry --port 2291 --key /path/to/guest-key
+```
+
+Omit `--resume` for an independent fresh adjudication. Without a live guest, archive-only judging
+is supported, but the Agent must explicitly account for unavailable live evidence. Never point
+live tools at a different restored guest and call it the original historical machine.
+
+Set `ICE_JUDGE_BASE_URL`, `ICE_JUDGE_MODEL`, `ICE_JUDGE_API_KEY`, `ICE_JUDGE_MAX_OUTPUT_TOKENS` and `ICE_JUDGE_TIMEOUT` to configure
+the judge independently of the defender. An explicit `ICE_JUDGE_MODEL` wins over the optional local `/root/.config/ice-arena/judge.json` model profile (`ICE_JUDGE_CONFIG` can select another file). Existing blue settings are the fallback for
+connection configuration only, not a fallback scoring algorithm. Model choice is recorded in the
+judge seal. The adapter does not silently select another model; validation experiments using another
+model are separate adjudications. Transport failures, invalid schemas and earlier judgments remain
+in audit artifacts. New validations require explicit coverage accounting for invalid historical
+snapshots; older sealed verdicts retain their original validation version for historical verification.
+
+
+Independent-axis mode stores each Agent's original component decisions in `judge_axes/` and binds
+them to the assembled verdict; the controller never fills missing axes with zeros. Each context
+must inspect evidence itself and can cite only evidence actually shown in that context. Joint
+investigation remains an explicit `ICE_JUDGE_MODE=joint` option for historical review experiments.
+The `--resume` checkpoint mechanism supports joint mode and sealed per-axis checkpoints. Completed
+axes are reused only when the evidence, model and guide fingerprints match; remaining axes continue
+in fresh independent contexts. Changed guides/models require a fresh revision rather than silently
+mixing judgments. Unsealed older partial artifacts are preserved and cannot be promoted to decisions.
+
+The two reward ledgers overlap: a new red-caused disclosure after takeover can increase red reward
+and blue loss simultaneously. Takeover limits only blue's liability, never red's reward window.
+Likewise, red-established control left active is still red's outcome, not exclusively a blue error.
+This interpretation belongs in the judge instructions and evidence reasoning; it is not silently
+repaired by a numeric rule after the Agent answers.
+
+
+Long jobs should run in tmux on the controller with persistent logs and a status file. A disconnected
+chat/SSH client must not trigger another attack rollout. Check the existing process, episode files
+and judge checkpoints first; resume adjudication over the original evidence in a separate revision.
+The API output budget includes reasoning tokens for some models: truncated/no-answer responses
+are failures or continuation points, never completed Agent judgments.

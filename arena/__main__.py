@@ -134,6 +134,8 @@ def main():
     process = sub.add_parser("process-demo")
     process.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
+    if getattr(args, 'blue', None) == 'openai':
+        parser.error('New model rollouts require the judge Agent: use arena.host_match with round_plan. This application runner is retained only for legacy infrastructure fixtures.')
     if args.command == "suite":
         asyncio.run(suite(args.out))
     elif args.command == "score":

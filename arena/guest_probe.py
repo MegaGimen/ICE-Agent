@@ -11,7 +11,7 @@ import subprocess
 import time
 
 GUEST_SCRIPT = r'''
-import hashlib,json,os,pathlib,subprocess,sys,urllib.request
+import hashlib,json,os,pathlib,stat,subprocess,sys,urllib.request
 config=json.loads(sys.argv[1])
 result={'processes':[], 'endpoints':{}, 'clock_ticks_per_second':os.sysconf('SC_CLK_TCK')}
 for path in pathlib.Path('/proc').glob('[0-9]*'):
@@ -30,10 +30,17 @@ result['files']={}
 for name in config.get('files',[]):
  try:
   h=hashlib.sha256()
-  with open(name,'rb') as stream:
-   for block in iter(lambda:stream.read(1048576),b''):h.update(block)
-  result['files'][name]=h.hexdigest()
+  fd=os.open(name,os.O_RDONLY|os.O_NONBLOCK)
+  mode=os.fstat(fd).st_mode
+  if not stat.S_ISREG(mode):
+   os.close(fd)
+   result['files'][name]='nonregular:'+('directory' if stat.S_ISDIR(mode) else 'special')
+  else:
+   with os.fdopen(fd,'rb') as stream:
+    for block in iter(lambda:stream.read(1048576),b''):h.update(block)
+   result['files'][name]=h.hexdigest()
  except FileNotFoundError:result['files'][name]=None
+ except IsADirectoryError:result['files'][name]='nonregular:directory'
 result['units']={}
 for name in config.get('units',[]):
  item={}

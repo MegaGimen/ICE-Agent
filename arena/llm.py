@@ -74,6 +74,7 @@ class OpenAIBlue:
                                                               "observation": observation})}]
         if initial_messages is not None:
             messages.append({"role": "user", "content": json.dumps({"fresh_observation": observation, "brief": ctx.public_brief()})})
+        self.messages = messages
         reviewed = False
         for turn in range(self.max_turns):
             remaining = ctx.deadline - time.monotonic()
@@ -106,13 +107,18 @@ class OpenAIBlue:
                     messages.append({"role": "user", "content": self.final_review})
                     continue
                 return
-            for call in calls:
+            for call_index, call in enumerate(calls):
                 fn = call.get("function") or {}
                 try:
                     arguments = json.loads(fn.get("arguments") or "{}")
                     if not isinstance(arguments, dict):
                         raise ValueError("arguments must be an object")
                     result = await ctx.call(fn.get("name", ""), **arguments)
+                except ArenaClosed:
+                    for pending in calls[call_index:]:
+                        messages.append({"role":"tool","tool_call_id":pending.get("id"),
+                                         "content":json.dumps({"ok":False,"error":"Action window ended before this tool call could start; not executed."})})
+                    raise
                 except (ValueError, TypeError) as error:
                     result = {"ok": False, "error": str(error)}
                 messages.append({"role": "tool", "tool_call_id": call.get("id"),

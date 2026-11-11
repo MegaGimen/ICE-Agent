@@ -90,5 +90,12 @@ def main():
     p=argparse.ArgumentParser();p.add_argument('--out',type=Path,required=True)
     p.add_argument('--config',type=Path,required=True);p.add_argument('--port',type=int,required=True);p.add_argument('--key',type=Path,required=True)
     p.add_argument('--blue',choices=['model','idle','shutdown','repair'],default='model')
-    args=p.parse_args();asyncio.run(run(args))
+    p.add_argument('--legacy-v1',action='store_true',help='Explicitly retain the old incident-based zero-sum reward')
+    args=p.parse_args()
+    if 'round_plan' in json.loads(args.config.read_text()):
+        if args.blue not in ('model','idle'):p.error('Use arena.round_match --blue script for scripted round controls')
+        from .round_match import run as run_rounds
+        asyncio.run(run_rounds(args))
+    elif args.legacy_v1:p.error('Old rule scores are read-only historical records. New host matches require the judge Agent and a round_plan.')
+    else:p.error('Responsibility-aware matches require round_plan; --legacy-v1 is only for reproducing the old reward version.')
 if __name__=='__main__':main()
