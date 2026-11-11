@@ -1,7 +1,7 @@
 """Alternating foreground actors with continuous guest state and independent observation."""
 import argparse,asyncio,copy,json,math,shlex,subprocess,time,uuid
 from pathlib import Path
-from .contracts import ArenaClosed,RewardProfile,digest
+from .contracts import ArenaClosed,digest
 from .guest_probe import probe
 from .host_blue import GuestContext,HOST_ROLE,HOST_TOOLS
 from .llm import OpenAIBlue
@@ -61,10 +61,10 @@ async def run(args):
     if not n or any(not math.isfinite(x) or x<=0 for x in (red_seconds,blue_seconds,interval)):raise ValueError('invalid schedule')
     if cfg['receipt_coverage']!='closed_scripted_transport':raise ValueError('receipt coverage not declared')
     root=args.out;root.mkdir(parents=True,exist_ok=False,mode=0o700);(root/'private').mkdir(mode=0o700)
-    ident=uuid.uuid4().hex;assets={'assets':[{'id':a['id'],'weight':a['weight']} for a in cfg['assets']]}
+    ident=uuid.uuid4().hex;assets={'assets':[{k:v for k,v in a.items() if k in ('id','path','description','kind')} for a in cfg['assets']]}
     write_json(root/'private/assets.json',assets,private=True)
     model=OpenAIBlue(tools=HOST_TOOLS,role=HOST_ROLE,max_turns=12,max_output_tokens=3000,model_timeout=blue_seconds) if args.blue=='model' else None
-    spec={'match_id':ident,'reward_version':VERSION,'weights':RewardProfile().weights,'rounds':n,
+    spec={'match_id':ident,'reward_version':VERSION,'rounds':n,
           'red_seconds':red_seconds,'blue_seconds':blue_seconds,'max_overrun_seconds':12,'max_probe_gap_seconds':12,
           'gamma':cfg.get('gamma',1),'cpu_capacity':cfg.get('cpu_capacity',2),'asset_manifest_hash':digest(assets),
           'endpoints':[e['name'] for e in cfg['probe']['endpoints']],'files':cfg['probe']['files'],'units':cfg['probe']['units'],

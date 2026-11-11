@@ -24,15 +24,17 @@ def finalize(root):
     if s['scored']:
         verdict=json.loads((root/'judge_verdict.json').read_text())
         for role in ('red','blue'):
-            write_json(root/(role+'_reward.json'),{'reward':s[role+'_reward'],'components':verdict['rounds'][-1][role],'judge_kind':'agent'},private=True)
-        write_json(root/'incident_outcome.json',{'loss':s['incident_loss'],'components':verdict['rounds'][-1]['incident'],'judge_kind':'agent'},private=True)
+            write_json(root/(role+'_reward.json'),{'reward':s[role+'_reward'],'assessment':verdict['rounds'][-1][role],'judge_kind':'agent'},private=True)
+        incident={'assessment':verdict['rounds'][-1]['incident'],'judge_kind':'agent'}
+        if 'incident_loss' in s:incident['historical_v3_loss']=s['incident_loss']
+        write_json(root/'incident_outcome.json',incident,private=True)
         roles={}
         for role in ('red','blue'):
             rows=read_journal(root/(role+'_trajectory.jsonl'))
             if not rows or any(r['context_id']!=s['match_id'] for r in rows):raise ValueError('trajectory context mismatch')
             roles[role]={'reward':s[role+'_reward'],'model_trajectory':any(r['kind']=='model.output' for r in rows),'trajectory_head':rows[-1]['hash']}
         names=['match.json','completion.json','outcomes.jsonl','private/assets.json','score.json','judge_verdict.json','judge_seal.json','judge_trajectory.jsonl','red_trajectory.jsonl','blue_trajectory.jsonl','red_reward.json','blue_reward.json','incident_outcome.json']
-        write_json(root/'training_binding.json',{'match_id':s['match_id'],'judge_kind':'agent','roles':roles,'files':{n:file_hash(root/n) for n in names},'token_training_ready':False,'supervision':'whole-match Agent rewards; per-round returns are audit values, not token advantages'},private=True)
+        write_json(root/'training_binding.json',{'match_id':s['match_id'],'judge_kind':'agent','reward_version':s.get('reward_version'),'judgment_hash':file_hash(root/'judge_seal.json'),'roles':roles,'files':{n:file_hash(root/n) for n in names},'token_training_ready':False,'supervision':'whole-match Agent rewards; per-round returns are audit values, not token advantages'},private=True)
         verify(root)
     package_case(root,case,{'title':'Agent-judged multi-round host defence','summary':f"judge=Agent; scored={s['scored']}; blue={s['blue_reward']}; red={s['red_reward']}",'evidence_context':'agent_investigation_over_controller_evidence','limitations':['Judge findings and scores are model judgments with cited evidence, not infallible ground truth.','Live guest inspection is after-match state, not retrospective proof of missing history.','No rule-based substitute when the judge fails or evidence is insufficient.','Scripted red fixture; no optimizer update.']})
     verify_case(case);return s

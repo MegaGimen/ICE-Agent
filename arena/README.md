@@ -1,4 +1,45 @@
-## Current judge: Agent-owned investigation and scores
+## Current scoring policy: Agent assessment of actual impact (v4)
+
+The user rejected metric normalization as a reward ruler. `host-agent-impact-v4` does not turn CPU
+seconds/core count/duration, file/process/asset counts, severity labels or fixed axis weights into
+rewards. CPU counters, hardware context and timestamps remain evidence, not score denominators.
+The existing 0..1 output range is an interface convention, not a measured damage percentage.
+
+Specialist Agent passes produce qualitative findings and uncertainties for each axis. A final
+Agent independently checks important evidence and directly assigns red and blue rewards with
+reasons. The controller validates format, references and artifact integrity and copies those
+rewards unchanged. Per-round deltas/discounted returns are audit derivatives of the supplied rewards,
+not a formula that decides them. Recovery may improve an overall response rating without claiming
+that earlier damage never occurred; no monotonic component-penalty rule is imposed.
+
+The single takeover boundary and agreed causal responsibilities remain. Red's event assessment
+covers before and after takeover; blue's response assessment excludes pre-takeover losses. A later
+red-caused loss may concern both, while blue-origin harm is not automatically red success.
+
+To rejudge without repeating the attack or exposing old grades to the model:
+
+```bash
+python3 -m arena.judge_agent ORIGINAL_RUN --revision-out NEW_IMPACT_REVIEW
+python3 -m arena.round_scoring verify NEW_IMPACT_REVIEW
+```
+
+Run long adjudications in tmux and retain logs/status. `--resume` reuses completed v4 finding passes
+only under the same evidence/model/guide fingerprint. Old metric-based checkpoints require a fresh
+revision, not resume. Old verdicts remain verifiable via the archived v3 reader but are not current
+accepted rewards. Their weights and asset budgets are excluded from the new Agent's public evidence
+view; original files remain byte-preserved for provenance. New contracts omit scoring weights.
+
+`impact_findings/` contains qualitative findings and the final Agent's direct verdict; there are no
+numeric component losses to aggregate. `judge_verdict.json`, `judge_trajectory.jsonl`, `judge_seal.json`,
+role reward files and the training binding preserve the decision and its evidence. A declined or
+incomplete judgment has no substituted reward. No optimizer update is implied by a rejudgment.
+
+The sections below describe previous implementations and retained tooling. Their equal-weight or
+metric-normalization descriptions are historical and do not govern new v4 judging.
+
+---
+
+## Historical v3 Agent judging and retained tools
 
 New host rollouts use `python -m arena.round_match` (or `arena.host_match` with a `round_plan`).
 By default each axis has an independent judge Agent context, following the original per-axis investigation approach. The judge Agent actively reads event history, acquisition/version evidence and live read-only

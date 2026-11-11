@@ -1,6 +1,6 @@
 import asyncio,json,subprocess,sys
 import pytest
-from arena.judge_agent import Evidence,INSPECT,aggregate,adjudicate,load_score,validate,calculate
+from arena.legacy_metric_judge import Evidence,INSPECT,aggregate,adjudicate,load_score,validate,calculate
 from arena.round_scoring import score_rounds
 from arena.storage import write_json
 from test_rounds import fixture
@@ -105,7 +105,7 @@ def test_budget_failure_does_not_forge_an_agent_verdict(tmp_path,monkeypatch):
 
 def test_axis_panel_assembles_only_agent_values_and_keeps_axis_evidence(tmp_path,monkeypatch):
     from arena.llm import OpenAIBlue
-    from arena.judge_agent import adjudicate_axes,AXES
+    from arena.legacy_metric_judge import adjudicate_axes,AXES
     prepare_fixture(tmp_path)
     monkeypatch.setenv('ARENA_BLUE_BASE_URL','https://example.org');monkeypatch.setenv('ARENA_BLUE_MODEL','test')
     def generate(provider,messages,timeout):
@@ -127,7 +127,7 @@ def test_axis_panel_assembles_only_agent_values_and_keeps_axis_evidence(tmp_path
 
 def test_axis_resume_reuses_sealed_complete_axes_without_new_model_calls(tmp_path,monkeypatch):
     from arena.llm import OpenAIBlue
-    from arena.judge_agent import adjudicate_axes,AXES,judge_match
+    from arena.legacy_metric_judge import adjudicate_axes,AXES,judge_match
     prepare_fixture(tmp_path)
     monkeypatch.setenv('ARENA_BLUE_BASE_URL','https://example.org');monkeypatch.setenv('ICE_JUDGE_MODEL','test')
     state={'fail':True,'confidentiality_calls':0}
@@ -144,7 +144,7 @@ def test_axis_resume_reuses_sealed_complete_axes_without_new_model_calls(tmp_pat
     with pytest.raises(TimeoutError):asyncio.run(adjudicate_axes(tmp_path))
     before=(tmp_path/'judge_axes/confidentiality.json').read_bytes();calls=state['confidentiality_calls']
     state['fail']=False
-    result=asyncio.run(judge_match(tmp_path,resume=True))
+    result=asyncio.run(adjudicate_axes(tmp_path,resume=True))
     assert result['scored'] and state['confidentiality_calls']==calls
     assert (tmp_path/'judge_axes/confidentiality.json').read_bytes()==before
     assert load_score(tmp_path)==result
